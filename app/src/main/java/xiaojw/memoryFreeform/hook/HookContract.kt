@@ -47,6 +47,19 @@ object HookContract {
     const val KILL_SWITCH_PATH = "/data/system/memoryfreeform_hook.off"
 
     /**
+     * ★ fix140：**圆角修复的单独开关**（SystemUI 侧读）。
+     *
+     * 总闸 [KILL_SWITCH_PATH] 会连 system_server 那两个钩子一起关掉（那些是核心功能），
+     * 而"四角不闪直角"只是观感修正，万一在某些 ROM 上 [FreeformCornerHook] 挂点命中了
+     * 不该命中的动画，得能单独摘掉它。
+     * root 建法：`touch /data/system/memoryfreeform_corner.off` + 重启 SystemUI（或重启手机）。
+     */
+    const val CORNER_OFF_PATH = "/data/system/memoryfreeform_corner.off"
+
+    /** ★ fix140：圆角钩子的自检文件（SystemUI 进程每 5 秒写一次）。 */
+    const val CORNER_STATE_PATH = "/data/system/memoryfreeform_corner.state"
+
+    /**
      * **出生几何目标**（App 写、hook 读）。一行空格分隔：
      * `pkg=<包名> l=<左> t=<上> r=<右> b=<下> ts=<秒级时间戳> done=<0|1>`
      *

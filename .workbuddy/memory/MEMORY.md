@@ -72,6 +72,23 @@
   adoptExisting（判据 `WindowWatcher.lastTasks()`）。
 - 调试利器：`memoryfreeform_record.state(.moved)` 探针、反编译 services.jar（jadx 在 .workbuddy/tmp/rom/）。
 
+## ★ 小窗圆角（fix140，真机定论，勿推翻）
+- 圆角 = **SurfaceFlinger 图层属性** `roundedCorner`（+ 父层 `drawFreeformEffect`），打在 task/leash 图层，
+  父层向下传给子层；App 侧**没有任何** drawable/overlay 负责它。
+- 稳定值 **67.1429 = 47 / 0.70**：47px = 18dp（`MiuiFreeFormManagerService.getMiuiFreeformCornerRadius()`
+  的 `applyDip2Px(18.0f)`，mini 小窗 12dp），0.70 = 图层缩放（同 `MiuiPipImpl` / `TransitionImpl` 的 `/scale`）。
+- **开窗时它被从 ~0 补间到 67.14（约 500ms ease-out）** ⇒ 用户看到的"四角闪一下直角"。
+  补间在 **SystemUI（pid 7950）WMShell**：`MultiTaskingTransitionHandler → MiuiFreeformModeAnimation`
+  的 folme 动画（冷开 = `startMoveToFrontAnimation` / type 13；另有 type 16 的
+  `startFullScreenToFreeformAnimation` 显式写 0→R）。**这是澎湃设计的入场动画，非本项目引入。**
+- 修法：`hook/FreeformCornerHook.kt` 装在 **com.android.systemui**，拦 `MultiTaskingFolmeState.addProperty`，
+  让 `FOLME_RADIUS` 起点=终点（三/四参改 from；两参先 `mFolmeControl.setFolmeRadius(to)`）。
+  ⚠ **必须用户在 LSPosed 里手动勾 `com.android.systemui` 作用域并重启**才生效（manifest 只声明 `android`）。
+  单独开关 `memoryfreeform_corner.off`；自检 `/data/system/memoryfreeform_corner.state`。
+- 取证：`dumpsys SurfaceFlinger | grep -E "Layer \[|roundedCorner"`；
+  `logcat | grep -E "MiuiFreeformModeAnimation: |mMultiTaskingAnimationType"`。
+  反编译资产在 `.workbuddy/tmp/rom/`（jadx `bin/`，已解 `msjar-src/` + `single/`）。
+
 ## 现状（1.0.131，2026-09-25）
 - ★★ 仓库历史已由用户清空重建（463cdec "迁移至 memory-freeform 远端"），fix 编号照旧。
 - ★★1.0.131（并入 463cdec）：①**关闭小窗竞态修复**——miuiTasks 靠 watcher ~2s 轮询登记，

@@ -46,14 +46,22 @@ private const val TAG = "SingleHand/"
  * - `ModuleConfig`：conf 协议解析（width/height/mode/packages）。已无 conf 文件，
  *   它的 `markActive()` 职责内联进本类（见 [markActive]）。
  *
- * 作用域：android（系统框架）。模块与单手模式 App 是同一个 APK。
+ * 作用域：android（系统框架）+ ★fix140 起加 com.android.systemui（WMShell，只挂圆角修正）。
+ * 模块与单手模式 App 是同一个 APK。
  */
 class HookEntry : IXposedHookLoadPackage {
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        // 只处理系统框架（system_server）
-        if (lpparam.packageName != "android") return
+        when (lpparam.packageName) {
+            // 系统框架（system_server）—— 出生几何 + 位置记忆
+            "android" -> installSystemServer(lpparam)
+            // ★ fix140：SystemUI（WMShell）—— 小窗入场动画的圆角补间，见 [FreeformCornerHook]
+            "com.android.systemui" -> installSystemUi(lpparam)
+            else -> return
+        }
+    }
 
+    private fun installSystemServer(lpparam: XC_LoadPackage.LoadPackageParam) {
         runCatching {
             // 总闸：救命开关存在时一个钩子都不装，system_server 完全走原生路径
             if (java.io.File(HookContract.KILL_SWITCH_PATH).exists()) {
@@ -74,6 +82,31 @@ class HookEntry : IXposedHookLoadPackage {
             XposedBridge.log(TAG + "hook installed in " + lpparam.processName)
         }.onFailure {
             XposedBridge.log(TAG + "install failed")
+            XposedBridge.log(it)
+        }
+    }
+
+    /**
+     * ★ fix140：SystemUI（WMShell）里的圆角修正。
+     *
+     * 只装 [FreeformCornerHook] 一个点，且它自己全流程 `runCatching` —— SystemUI 是桌面与
+     * Shell 的宿主进程，这里出问题比 system_server 更显眼，所以：
+     *  - 总闸 [HookContract.KILL_SWITCH_PATH] 存在时不装；
+     *  - 找不到 folme 那两个类 / `FOLME_RADIUS` 字段时直接放弃（ROM 改了就不生效，不崩）。
+     *
+     * ⚠ 需要在 LSPosed 里手动给本模块勾选 `com.android.systemui` 作用域并重启
+     *   （manifest 的 `xposedscope` 只声明了 `android`）。没勾 = 完全不生效、无副作用。
+     */
+    private fun installSystemUi(lpparam: XC_LoadPackage.LoadPackageParam) {
+        runCatching {
+            if (java.io.File(HookContract.KILL_SWITCH_PATH).exists()) {
+                XposedBridge.log(TAG + "corner hook disabled by kill switch")
+                return
+            }
+            FreeformCornerHook.install(lpparam)
+            XposedBridge.log(TAG + "corner hook installed in " + lpparam.processName)
+        }.onFailure {
+            XposedBridge.log(TAG + "corner install failed")
             XposedBridge.log(it)
         }
     }
