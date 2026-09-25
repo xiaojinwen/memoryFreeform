@@ -509,6 +509,12 @@ private fun SettingsRoot(
             checked = state.floatBallSlideMode,
             onCheckedChange = { StateManager.updateFloatBallSlide(it) }
         )
+        SuperSwitch(
+            title = "悬浮球空闲自动贴边",
+            summary = "开：5 秒不操作自动收起贴边（只留一条小缝）；点一下收起的球即可恢复",
+            checked = state.autoDock,
+            onCheckedChange = { StateManager.updateAutoDock(it) }
+        )
     }
 
     SmallTitle("LSPosed 模块状态")

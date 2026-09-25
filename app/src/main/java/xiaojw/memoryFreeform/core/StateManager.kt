@@ -62,6 +62,13 @@ data class AppState(
      */
     val floatBallSlideMode: Boolean = false,
     /**
+     * ★ fix137：悬浮球**空闲自动贴边**（默认 true = 开）。
+     * 开：5 秒无操作自动吸附到最近边缘并收起（只留一条小 peek 不挡内容）；
+     *     点一下收起的球即弹回正常停靠位。
+     * 关：保持常驻，永不自动收起。
+     */
+    val autoDock: Boolean = true,
+    /**
      * ★ fix88：**记不记「小窗大小」**（默认 false = 只记位置）。
      *
      * 记忆文件里存的是完整矩形 `l,t,r,b`，本来等于「位置 + 大小一起记」。关掉之后
@@ -99,6 +106,8 @@ object StateManager {
     private const val KEY_BALL = "float_ball_enabled"
     /** ★ 1.0.102：悬浮球交互方式（false=点击展开 / true=按住滑动选择） */
     private const val KEY_BALL_SLIDE = "float_ball_slide_mode"
+    /** ★ fix137：悬浮球空闲自动贴边（默认 true = 开） */
+    private const val KEY_AUTO_DOCK = "float_ball_auto_dock"
     /** ★ fix88 加 / ★ fix91：记不记小窗大小（默认 true = 位置+大小都记） */
     private const val KEY_REMEMBER_SIZE = "remember_window_size"
     private const val KEY_LAST_PKG = "last_package"
@@ -143,6 +152,7 @@ object StateManager {
             bottomGapPx = readBottomGap(p, context),
             floatBallEnabled = p.getBoolean(KEY_BALL, true),
             floatBallSlideMode = p.getBoolean(KEY_BALL_SLIDE, false),
+            autoDock = p.getBoolean(KEY_AUTO_DOCK, true),
             rememberWindowSize = p.getBoolean(KEY_REMEMBER_SIZE, true),
             lastPackage = p.getString(KEY_LAST_PKG, null)?.takeIf { it.isNotEmpty() },
             lastActivity = p.getString(KEY_LAST_ACT, null)?.takeIf { it.isNotEmpty() }
@@ -179,6 +189,7 @@ object StateManager {
             ?.putInt(KEY_BOTTOM_GAP, current.bottomGapPx)
             ?.putBoolean(KEY_BALL, current.floatBallEnabled)
             ?.putBoolean(KEY_BALL_SLIDE, current.floatBallSlideMode)
+            ?.putBoolean(KEY_AUTO_DOCK, current.autoDock)
             ?.putBoolean(KEY_REMEMBER_SIZE, current.rememberWindowSize)
             ?.putString(KEY_LAST_PKG, current.lastPackage.orEmpty())
             ?.putString(KEY_LAST_ACT, current.lastActivity.orEmpty())
@@ -335,6 +346,9 @@ object StateManager {
 
     /** ★ 1.0.102：切换悬浮球交互方式（点击展开 / 按住滑动选择）。 */
     fun updateFloatBallSlide(enabled: Boolean) { _state.value = current.copy(floatBallSlideMode = enabled); save() }
+
+    /** ★ fix137：悬浮球空闲自动贴边开关。 */
+    fun updateAutoDock(enabled: Boolean) { _state.value = current.copy(autoDock = enabled); save() }
 
     /**
      * ★ fix88：设置「记不记小窗大小」。

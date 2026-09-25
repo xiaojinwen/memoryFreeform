@@ -76,6 +76,12 @@ class FloatingBallService : Service() {
         /** ★ 1.0.101：按住多久算"长按"，长按生效后才能拖动悬浮球。 */
         private const val LONG_PRESS_MS = 1000L
 
+        /** ★ fix137：空闲多久（ms）无操作，自动贴边收起。 */
+        private const val IDLE_DOCK_MS = 5000L
+
+        /** ★ fix137：收起后露出的可见宽度（dp），方便点回来恢复。 */
+        private const val DOCK_PEEK_DP = 16f
+
         /** ★ fix130：悬浮球直径（dp）—— 52 太小不好点，加大到 60。所有球径引用统一走这里。 */
         private const val BALL_SIZE_DP = 60
 
@@ -164,6 +170,38 @@ class FloatingBallService : Service() {
      */
     private var menuClosedAt = 0L
 
+    /**
+     * ★ fix137：是否已**收起贴边**（只露一条小 peek）。
+     * 收起态下点一下球 = 弹回最近边缘的正常停靠位（[restoreFromDock]），这一下不再开菜单。
+     */
+    private var docked = false
+
+    /** ★ fix137：这一下按下是"点一下收起球恢复"，UP 时不再弹菜单。 */
+    private var justRestored = false
+
+    /**
+     * ★ fix137：空闲自动贴边计时器。
+     * 自判 `autoDock` 开关（关 → 直接 return，已排队的也不会收起）；
+     * 正在拖 / 菜单开着也不收起。
+     */
+    private val idleRunnable = Runnable {
+        if (!StateManager.current.autoDock) return@Runnable
+        if (!docked && !dragging && menuView == null) autoDockToEdge()
+    }
+
+    /** ★ fix137：重新计时空闲（任何交互结束 / 菜单收起后调用）。 */
+    private fun scheduleIdleDock() {
+        mainHandler.removeCallbacks(idleRunnable)
+        if (StateManager.current.autoDock) {
+            mainHandler.postDelayed(idleRunnable, IDLE_DOCK_MS)
+        }
+    }
+
+    /** ★ fix137：取消空闲计时（交互进行中 / 菜单开着）。 */
+    private fun cancelIdleDock() {
+        mainHandler.removeCallbacks(idleRunnable)
+    }
+
     /** ★ fix59：状态订阅只拉一次（见 [watchBallState]）。 */
     private var stateWatchStarted = false
 
@@ -190,6 +228,9 @@ class FloatingBallService : Service() {
         p.x = if (p.x + size / 2 < w / 2) 0 else w - size
         // ★ fix126：y 钳制带上底部留距
         p.y = p.y.coerceIn(0, (h - size - bottomMargin()).coerceAtLeast(0))
+        // ★ fix137：旋转后退出收起态，重新计时空闲
+        docked = false
+        cancelIdleDock()
         hideMenu()
         mainHandler.post { runCatching { wm?.updateViewLayout(ball, p) } }
     }
@@ -249,11 +290,19 @@ class FloatingBallService : Service() {
         ball.setOnTouchListener { v, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
+                    cancelIdleDock()
                     downRawX = e.rawX; downRawY = e.rawY
                     downX = p.x; downY = p.y
                     dragging = false
                     canDrag = false
                     hotIndex = -1
+                    // ★ fix137：收起态点一下 = 先弹回，这一下不再开菜单/拖动
+                    if (docked) {
+                        restoreFromDock()
+                        justRestored = true
+                        v.animate().scaleX(1.15f).scaleY(1.15f).setDuration(80).start()
+                        return@setOnTouchListener true
+                    }
                     menuOpenAtDown = menuView != null
                     val slideMode = StateManager.current.floatBallSlideMode
                     if (menuOpenAtDown) {
@@ -306,6 +355,12 @@ class FloatingBallService : Service() {
                 MotionEvent.ACTION_UP -> {
                     v.animate().scaleX(1.0f).scaleY(1.0f).setDuration(80).start()
                     mainHandler.removeCallbacks(longPressRunnable)
+                    // ★ fix137：收起态那一下轻点只弹回，不再开菜单
+                    if (justRestored) {
+                        justRestored = false
+                        scheduleIdleDock()
+                        return@setOnTouchListener true
+                    }
                     when {
                         slideSelect -> {
                             slideSelect = false
@@ -331,6 +386,8 @@ class FloatingBallService : Service() {
                         canDrag -> Unit
                         else -> showMenu(p)
                     }
+                    // ★ fix137：交互结束后重新计时空闲（菜单开着则由 hideMenu 再排）
+                    if (menuView == null) scheduleIdleDock()
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
@@ -340,6 +397,8 @@ class FloatingBallService : Service() {
                     hotIndex = -1
                     if (dragging) snapToEdge(p, size)
                     canDrag = false
+                    // ★ fix137：取消后重新计时空闲
+                    if (menuView == null) scheduleIdleDock()
                     true
                 }
                 else -> false
@@ -351,6 +410,8 @@ class FloatingBallService : Service() {
         runCatching { wm?.addView(ball, p) }
             .onFailure { SHLog.e(TAG, "addView failed", it) }
         applyBallState(StateManager.isWindowAlive())
+        // ★ fix137：球建好即开始计时空闲，5 秒不动自动收起贴边
+        scheduleIdleDock()
     }
 
     private fun screenH(): Int = resources.displayMetrics.heightPixels
@@ -402,11 +463,56 @@ class FloatingBallService : Service() {
 
     /** 拖拽松手后吸附到左/右边缘。 */
     private fun snapToEdge(p: WindowManager.LayoutParams, size: Int) {
+        // ★ fix137：手动吸附 = 退出收起态
+        docked = false
         val w = resources.displayMetrics.widthPixels
         p.x = if (p.x + size / 2 < w / 2) 0 else w - size
         // ★ fix126：底部留距（见 [bottomMargin]）
         p.y = p.y.coerceIn(0, (screenH() - size - bottomMargin()).coerceAtLeast(0))
         runCatching { wm?.updateViewLayout(ballView, p) }
+    }
+
+    /**
+     * ★ fix137：空闲自动贴边 —— 吸附到最近边缘并**收起**（只露 [DOCK_PEEK_DP] 小条），不挡内容。
+     * 点一下收起球即 [restoreFromDock] 弹回。
+     */
+    private fun autoDockToEdge() {
+        val ball = ballView ?: return
+        val p = params ?: return
+        val size = p.width.takeIf { it > 0 } ?: (BALL_SIZE_DP * resources.displayMetrics.density).toInt()
+        val w = resources.displayMetrics.widthPixels
+        val left = p.x + size / 2f < w / 2f
+        docked = true
+        val peek = (DOCK_PEEK_DP * resources.displayMetrics.density).toInt()
+        val targetX = if (left) -(size - peek) else w - peek
+        animateToX(ball, p, targetX)
+    }
+
+    /** ★ fix137：点一下收起球 —— 弹回最近边缘的正常停靠位（完全可见、可拖）。 */
+    private fun restoreFromDock() {
+        val ball = ballView ?: return
+        val p = params ?: return
+        val size = p.width.takeIf { it > 0 } ?: (BALL_SIZE_DP * resources.displayMetrics.density).toInt()
+        val w = resources.displayMetrics.widthPixels
+        val left = p.x + size / 2f < w / 2f
+        docked = false
+        val targetX = if (left) 0 else w - size
+        animateToX(ball, p, targetX)
+    }
+
+    /** ★ fix137：x 方向平滑滑动（贴边 / 收起 / 恢复都用）。 */
+    private fun animateToX(ball: View, p: WindowManager.LayoutParams, targetX: Int) {
+        val from = p.x
+        if (from == targetX) { runCatching { wm?.updateViewLayout(ball, p) }; return }
+        ValueAnimator.ofInt(from, targetX).apply {
+            duration = 240L
+            interpolator = OvershootInterpolator(0.9f)
+            addUpdateListener { va ->
+                p.x = va.animatedValue as Int
+                runCatching { wm?.updateViewLayout(ball, p) }
+            }
+            start()
+        }
     }
 
     /**
@@ -430,6 +536,8 @@ class FloatingBallService : Service() {
     private class FanItem(val kind: Int, val label: String, val action: () -> Unit)
 
     private fun showMenu(p: WindowManager.LayoutParams) {
+        // ★ fix137：菜单开着期间不自动收起
+        cancelIdleDock()
         if (menuView != null) { hideMenu(); return }
         // ★ fix58：刚收起就再弹一次没有任何意义，而且正是"点了没关掉"的元凶（见 menuClosedAt）
         val since = android.os.SystemClock.uptimeMillis() - menuClosedAt
@@ -780,6 +888,8 @@ class FloatingBallService : Service() {
         hotIndex = -1
         // ★ fix58：记下收起时刻 —— 给 showMenu 那道"刚收起就别再弹"的闸用
         menuClosedAt = android.os.SystemClock.uptimeMillis()
+        // ★ fix137：菜单收起后重新计时空闲
+        scheduleIdleDock()
     }
 
     /** 应用的显示名（拿不到就退回包名）。只在菜单里给一项用，PM 查询一次可接受。 */
