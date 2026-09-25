@@ -45,6 +45,13 @@ import java.util.concurrent.atomic.AtomicInteger
  * 现算（`Resources.getSystem().displayMetrics` 在 system_server 里给的是 3.5 不是 2.625，
  * 拿它算会得到 90 —— 错的，别用），算不出来就用实测稳定值 67.1429。
  *
+ * ## 现状：默认关（fix145）
+ *
+ * 现在 SystemUI 作用域可用了，[FreeformCornerHook] 直接从动画源头把起点抬到终点，干净得多；
+ * 这条"抢 leash 高频覆盖"的兜底实测只能写上 1~2 帧（leash 很快被 release，报
+ * `mNativeObject ... is null. Have you called release() already?`），收益不划算。
+ * 保留代码但默认关，需要时 `touch /data/system/memoryfreeform_corner_keeper.on` + 重启。
+ *
  * ## 副作用与控制
  *
  *  - 维持 900ms（入场动画约 500ms），之后交还给系统的 finish transaction；
@@ -66,10 +73,16 @@ object FreeformCornerKeeperHook {
 
     @Volatile private var sites = 0
     @Volatile private var seen = 0
+    @Volatile private var claimed = 0
     @Volatile private var kept = 0
     @Volatile private var radius = 0f
     @Volatile private var lastMsg = "-"
     @Volatile private var lastBirthMs = 0L
+    /** 诊断：最近一次建 leash 的容器类型 / 窗口模式 / leash 名字。 */
+    @Volatile private var lastWc = "-"
+    @Volatile private var lastMode = -1
+    @Volatile private var lastName = "-"
+    @Volatile private var lastErr = "-"
 
     private val running = AtomicInteger(0)
     /** `makeAnimationLeash()` 返回的 Builder（链式调用紧接着就是 `build()`）。 */
@@ -86,6 +99,12 @@ object FreeformCornerKeeperHook {
         runCatching {
             if (File(HookContract.CORNER_OFF_PATH).exists()) {
                 lastMsg = "disabled by ${HookContract.CORNER_OFF_PATH}"
+                log(lastMsg)
+                return
+            }
+            if (!File(HookContract.CORNER_KEEPER_ON_PATH).exists()) {
+                // SystemUI 侧那条（FreeformCornerHook）才是正解，这条兜底默认不开
+                lastMsg = "off (need ${HookContract.CORNER_KEEPER_ON_PATH})"
                 log(lastMsg)
                 return
             }
@@ -198,18 +217,22 @@ object FreeformCornerKeeperHook {
                         XposedBridge.hookMethod(m, object : XC_MethodHook() {
                             override fun afterHookedMethod(param: MethodHookParam) {
                                 runCatching {
-                                    if (pendingBuilder.get() !== param.thisObject) return@runCatching
+                                    val b = pendingBuilder.get()
+                                    if (b == null || b !== param.thisObject) return@runCatching
                                     val wc = pendingWc.get()
                                     pendingBuilder.set(null)
                                     pendingWc.set(null)
+                                    val name = nameOf(param.result)
                                     seen++
-                                    if (wc != null) {
-                                        if (isFreeform(wc)) {
-                                            radius = radiusOf(wc)
-                                            claim(param.result)
-                                        }
-                                    } else if (System.currentTimeMillis() - lastBirthMs < BIRTH_WINDOW_MS) {
-                                        // 拿不到 WindowContainer（老 ROM），退回时间窗
+                                    lastWc = wc?.javaClass?.simpleName ?: "null"
+                                    lastMode = modeOf(wc)
+                                    lastName = name ?: "?"
+                                    // 判据：容器确实在 freeform；或（拿不到模式时）图层名是 Task= 且落在开小窗时间窗内
+                                    val freeform = wc != null && isFreeform(wc)
+                                    val byName = name?.contains("Task=") == true &&
+                                        System.currentTimeMillis() - lastBirthMs < BIRTH_WINDOW_MS
+                                    if (freeform || byName) {
+                                        radius = if (wc != null) radiusOf(wc) else FALLBACK_RADIUS
                                         claim(param.result)
                                     }
                                 }
@@ -222,6 +245,22 @@ object FreeformCornerKeeperHook {
         }
         sites += nMake + nBuild
         msgs += "bld make=$nMake build=$nBuild"
+    }
+
+    /** 取 SurfaceControl 的名字（`mName` 字段，取不到就退 toString）。 */
+    private fun nameOf(sc: Any?): String? {
+        if (sc == null) return null
+        runCatching {
+            val n = XposedHelpers.getObjectField(sc, "mName")
+            if (n is String) return n
+        }
+        return runCatching { sc.toString() }.getOrNull()
+    }
+
+    private fun modeOf(wc: Any?): Int {
+        if (wc == null) return -2
+        return runCatching { XposedHelpers.callMethod(wc, "getWindowingMode") as? Int }
+            .getOrNull() ?: -3
     }
 
     private fun isFreeform(wc: Any): Boolean {
@@ -253,20 +292,33 @@ object FreeformCornerKeeperHook {
         if (running.get() >= 4) return
         val r = radius.takeIf { it > 0f } ?: FALLBACK_RADIUS
         running.incrementAndGet()
+        claimed++
+        log("claim radius=$r name=${nameOf(leash)}")
         Thread({
-            val txn = runCatching { newTransaction() }.getOrNull()
+            var txn = runCatching { newTransaction() }.getOrNull()
             if (txn == null) {
+                lastErr = "no Transaction ctor"
                 running.decrementAndGet()
                 return@Thread
             }
             val end = System.currentTimeMillis() + KEEP_MS
+            var errs = 0
             while (System.currentTimeMillis() < end) {
-                val ok = runCatching {
+                val res = runCatching {
                     XposedHelpers.callMethod(txn, "setCornerRadius", leash, r)
                     XposedHelpers.callMethod(txn, "apply")
-                }.isSuccess
-                if (!ok) break
-                kept++
+                }
+                if (res.isSuccess) {
+                    kept++
+                } else {
+                    errs++
+                    val e = res.exceptionOrNull()
+                    lastErr = "${e?.javaClass?.simpleName}:${e?.message}"
+                    if (errs == 1) log("keep error $lastErr (name=${nameOf(leash)})")
+                    // 事务坏了就换一个；连续失败太多说明 leash 已失效，收手
+                    txn = runCatching { newTransaction() }.getOrNull()
+                    if (txn == null || errs > 8) break
+                }
                 runCatching { Thread.sleep(INTERVAL_MS) }
             }
             running.decrementAndGet()
@@ -285,10 +337,11 @@ object FreeformCornerKeeperHook {
             while (true) {
                 runCatching { Thread.sleep(5_000L) }.getOrNull() ?: return@Thread
                 runCatching {
-                    val f = File(HookContract.CORNER_STATE_PATH)
-                    val tmp = File(HookContract.CORNER_STATE_PATH + ".tmp")
+                    val f = File(HookContract.CORNER_KEEPER_STATE_PATH)
+                    val tmp = File(HookContract.CORNER_KEEPER_STATE_PATH + ".tmp")
                     tmp.writeText(
-                        "keeperSites=$sites seen=$seen kept=$kept radius=$radius msg=$lastMsg\n"
+                        "keeperSites=$sites seen=$seen claimed=$claimed kept=$kept radius=$radius" +
+                            " wc=$lastWc mode=$lastMode name=$lastName err=$lastErr\n"
                     )
                     runCatching { tmp.setReadable(true, false) }
                     tmp.renameTo(f)

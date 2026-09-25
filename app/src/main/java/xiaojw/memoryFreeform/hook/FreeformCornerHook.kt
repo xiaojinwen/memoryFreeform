@@ -104,6 +104,10 @@ object FreeformCornerHook {
     /** 兜底（setCornerRadius）成功抬升的帧数。 */
     @Volatile private var clamped = 0
     @Volatile private var clampSites = 0
+    /** 头几帧半径为 0（纯直角）被抬上去的次数 —— 治"闪直角"的正主。 */
+    @Volatile private var zeroFixed = 0
+    /** 学到过几次稳定值（应 ≥1，否则说明钳制从没见过小窗动画）。 */
+    @Volatile private var learned = 0
     /** 自适应学到的稳定圆角（图层空间值，实测 67.14）。 */
     @Volatile private var stable = 0f
     @Volatile private var lastMsg = "-"
@@ -216,6 +220,10 @@ object FreeformCornerHook {
     private val lastRawLock = Any()
     private val lastRaw = java.util.WeakHashMap<Any, Float>()
 
+    /** 圆角合理区间（图层空间）。超出这个范围的值不是小窗圆角，一律不认。 */
+    private const val MIN_R = 30f
+    private const val MAX_R = 120f
+
     private fun clamp(param: XC_MethodHook.MethodHookParam) {
         val raw = param.args[1] as? Float ?: return
         val sc = param.args[0] ?: return
@@ -223,25 +231,43 @@ object FreeformCornerHook {
         synchronized(lastRawLock) {
             prev = lastRaw.put(sc, raw)
         }
-        if (raw <= 0f) return   // 0 = 主动清圆角（退出动画收尾 / 全屏），不动它
         val target = stable.takeIf { it > 0f } ?: defaultTarget()
-        if (raw >= target * 0.95f) {
-            // 已经够大：这就是稳定值，记下来供以后自适应
-            if (raw > stable) stable = raw
-            return
+        when {
+            // ① 入场的头几帧：半径是 0（直角矩形）—— 这正是"闪一下直角"的来源，抬上去。
+            //    （退出动画收尾也会写 0，但那时 prev 一定存在且是递减，下面 ④ 放行）
+            raw <= 0f -> {
+                if (prev != null) return
+                if (!isFreeformAnimStack()) return
+                param.args[1] = target
+                zeroFixed++
+            }
+            // ② 看起来已经到位：记下来当基准 —— ★ 但不能超过设计值。
+            //    folme 是弹簧动画，会**过冲**（实测冲到 70.88 再回落到 67.14），
+            //    早先这里无条件 `stable = max(stable, raw)`，把过冲值当成了稳定值，
+            //    结果圆角被永久钉成 70.88，比设计值大一圈（用户反馈"圆角有点奇怪"）。
+            //    现在只允许学到设计值以下，过冲帧一律不认。
+            raw >= target * 0.95f -> {
+                val cap = defaultTarget() * 1.02f
+                if (raw in MIN_R..MAX_R && raw <= cap && raw > stable) {
+                    stable = raw
+                    learned++
+                }
+            }
+            // ③ 递增段（0→…→67 的入场）：抬到终值
+            else -> {
+                if (prev != null && raw <= prev) return      // ④ 递减段 = 关闭/缩迷你窗，放行
+                if (!isFreeformAnimStack()) return
+                param.args[1] = target
+                clamped++
+            }
         }
-        // 只抬递增段（入场 0→5→20→33→…→67）；递减段是关闭/缩迷你窗，放行
-        if (prev != null && raw <= prev) return
-        if (!isFreeformAnimStack()) return
-        param.args[1] = target
-        clamped++
     }
 
     /** 终值 = 18dp / 0.70（18dp 是 MIUI 写死的，0.70 是 freeform 固定图层缩放）。 */
     private fun defaultTarget(): Float {
         val density = runCatching { android.content.res.Resources.getSystem().displayMetrics.density }
             .getOrDefault(2.625f)
-        return 18f * density / 0.70f
+        return (18f * density / 0.70f).coerceIn(MIN_R, MAX_R)
     }
 
     /**
@@ -292,18 +318,21 @@ object FreeformCornerHook {
     /** 自检落盘（后台线程，SystemUI 里绝不在回调栈上做 IO）。 */
     private fun startFlusher() {
         Thread({
+            var round = 0
             while (true) {
-                runCatching { Thread.sleep(5_000L) }.getOrNull() ?: return@Thread
+                runCatching { Thread.sleep(4_000L) }.getOrNull() ?: return@Thread
+                round++
+                val line = "installed=$installed clampSites=$clampSites snap=$snap fromTo=$fromTo " +
+                    "clamped=$clamped zero=$zeroFixed learned=$learned stable=$stable msg=$lastMsg"
+                // 自检文件（写不进去也不影响功能，错误只记一次）
                 runCatching {
-                    val f = File(HookContract.CORNER_STATE_PATH)
                     val tmp = File(HookContract.CORNER_STATE_PATH + ".tmp")
-                    tmp.writeText(
-                        "installed=$installed clampSites=$clampSites snap=$snap fromTo=$fromTo " +
-                            "clamped=$clamped stable=$stable msg=$lastMsg\n"
-                    )
+                    tmp.writeText("$line\n")
                     runCatching { tmp.setReadable(true, false) }
-                    tmp.renameTo(f)
-                }
+                    tmp.renameTo(File(HookContract.CORNER_STATE_PATH))
+                }.onFailure { if (round == 1) log("state write failed: ${it.message}") }
+                // 每 5 轮（20s）往 LSPosed 日志刷一次计数，文件读不到时还有这条渠道
+                if (round % 5 == 1) log(line)
             }
         }, "memoryfreeform-corner-flush").apply { isDaemon = true }.start()
     }

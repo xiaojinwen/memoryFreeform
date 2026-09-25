@@ -70,19 +70,44 @@
 
 ## ★ 小窗圆角（fix140，勿推翻）
 - 圆角=SurfaceFlinger 图层属性 `roundedCorner`，稳定值 **67.1429 = 47/0.70**（47px=18dp）。
-- 入场从 ~0 补间到 67.14（~500ms）是澎湃设计的动画，在 SystemUI WMShell
-  `MiuiFreeformModeAnimation` folme（冷开 type13 / 全屏转小窗 type16）。
-- 修法：`hook/FreeformCornerHook.kt` 装 **com.android.systemui**，两条腿：
-  ① 拦 `MultiTaskingFolmeState.addProperty` 令起点=终点（依赖 MIUI 私有签名，可能挂空）；
-  ② fix143 兜底：拦 `SurfaceControl$Transaction.setCornerRadius`，只抬**递增**段
-  （入场 0→67）+ 栈含 miuifreeform/multitasking；递减段（关闭/缩迷你窗）放行。
+- ★★ **fix144 推翻上面第一条：真因是我们自己的 BirthHook**。关掉 hook 圆角**照样**
+  补间（14.9→67），但不闪 —— 因为窗口同时在缩放，圆角同步长出来是自然变形。
+  BirthHook 让窗口"出生即最终尺寸"后，尺寸不动、只有圆角 0→67，直角才暴露。
+  所以要么把圆角钉住，要么别让尺寸一步到位。
+- 修法（fix144，`hook/FreeformCornerKeeperHook.kt`，**装 system_server**）：
+  leash 是 system_server 建的（`WindowContainer.makeAnimationLeash()` 返回
+  `SurfaceControl$Builder`，再 `.build()` 才是 leash；老 ROM 走
+  `SurfaceAnimator.createAnimationLeash`）。拿到 leash 后 **5ms 间隔写终值 67.14、
+  持续 900ms**，盖掉 SystemUI 每 16ms 的补间帧；缩放/位移/透明度不受影响。
+  ⚠ `Resources.getSystem().displayMetrics.density` 在 system_server 里是 **3.5**
+  （真机 2.625），算出来会是 90 —— 用反射 `getMiuiFreeformCornerRadius/getFreeformScale`
+  或实测值 **67.1429**。
+- ★★ **fix145 起 SystemUI 作用域可用了**（用户在 LSPosed UI 里手动勾上了，db 里可见
+  `('xiaojw.memoryFreeform','com.android.systemui',0)`，日志有
+  `corner hook installed in com.android.systemui`）。**只有"手工 INSERT db"那条路会整机
+  失效**，UI 勾选是安全的 —— fix143 那条"本机拿不到作用域"的定论作废。
+- 修法（正解，fix147）：`hook/FreeformCornerHook.kt` 装 **com.android.systemui**，两条腿：
+  ① 拦 `MultiTaskingFolmeState.addProperty` 令起点=终点（实测 `snap` 在涨，命中）；
+  ② 兜底拦 `SurfaceControl$Transaction.setCornerRadius`，只抬**递增**段 + 栈含
+  miuifreeform/multitasking；递减段（关闭/缩迷你窗）放行。
+  ★★ 兜底的自适应 `stable` **必须设上限 = defaultTarget()*1.02**：folme 是弹簧动画会
+  **过冲到 70.88**，无条件 `max()` 会把过冲值当稳定值 ⇒ 圆角被永久钉成 70.88（"圆角奇怪"）；
+  同理只认 **[30,120]** 区间的值，否则全屏动画的 235 会被学走（SF 显示 335.7）。
+  实测正解：stable=67.14286、clamped 持续增长、采样无个位数帧。
+- 兜底 `FreeformCornerKeeperHook`（system_server 抢 leash 高频写）**默认关**，需
+  `touch /data/system/memoryfreeform_corner_keeper.on`；实测它只能写 1~2 帧就
+  `mNativeObject ... is null`（leash 早被 release），收益不划算。自检另存
+  `/data/system/memoryfreeform_corner_keeper.state`。
 - ★★ **LSPosed 作用域必须用 resource 数组形式才会预勾**：`xposedscope` =
   `@array/xposed_scope`（`res/values/arrays.xml`：android + com.android.systemui）。
   字符串 value LSPosed 不解析 = 没声明（fix140 就是这么翻车的）。
   排查：`cat /data/adb/lspd/log/modules_*.log | grep "installed in"`。
 - 开关 `memoryfreeform_corner.off`；自检 `/data/system/memoryfreeform_corner.state`
-  （字段 installed/clampSites/snap/fromTo/clamped/stable）。
-  取证：`dumpsys SurfaceFlinger | grep roundedCorner`。
+  （installed/clampSites/snap/fromTo/clamped/zero/learned/stable）。
+  ⚠ **SystemUI 写不进 /data/system（EACCES）**，该文件的真实内容可能是 system_server 留下的旧值；
+  计数要看 **LSPosed 日志** `grep "SingleHand/Corner installed"`（每 20s 刷一次）。
+  ⚠ 只有**冷开**（先 `am stack remove` 掉已有 freeform task）才走入场动画，否则计数不动。
+  取证：`dumpsys SurfaceFlinger | awk '/Layer \[/{n=$0} /roundedCorner/{print n" => "$0}'`。
 
 ## 近期版本（更早的看 git 历史）
 - ★1.0.141：①**悬浮球默认关**（AppState.floatBallEnabled 默认 false + prefs 默认 false，老用户已存值不受影响）。
