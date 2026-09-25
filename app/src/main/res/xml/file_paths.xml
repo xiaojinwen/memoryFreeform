@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 日志都放在 getExternalFilesDir("logs") 下，分享时由 FileProvider 授权读取 -->
+    <external-files-path name="logs" path="logs/" />
+</paths>

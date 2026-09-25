@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">记忆小窗</string>
+    <string name="auth_shizuku">授权 Shizuku</string>
+    <string name="enable_mode">启用单手模式</string>
+    <string name="select_corner">选择角落</string>
+    <string name="corner_left">左下角</string>
+    <string name="corner_right">右下角</string>
+    <string name="scale_ratio">缩放比例</string>
+    <string name="show_float_ball">显示悬浮球</string>
+</resources>
