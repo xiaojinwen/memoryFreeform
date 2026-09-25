@@ -678,11 +678,12 @@ class CornerWindowService : Service() {
         // 底边：屏幕底往上让出「离底边间距」——这正是设置项该起的作用
         val bottom = (sh - navAvoidPx()).coerceAtLeast(dp(200))
         val w = (rect[2] - rect[0]).coerceIn(dp(240).coerceAtMost(sw), sw)
-        // ★ fix131：「最近任务」面板展示高度减 50dp（用户要求列表别顶满设置尺寸）；
-        //   「应用」面板不动（搜索框 + 键盘已经在抢高度）。
-        val hRaw = (rect[3] - rect[1]).coerceAtMost(bottom) -
-            (if (mode == PanelMode.RECENTS) dp(50) else 0)
-        val h = hRaw.coerceAtLeast(dp(200).coerceAtMost(bottom))
+        // ★ fix132：单手操作 —— 列表顶太高拇指够不着（1080×2400 上旧逻辑列表顶到屏幕上
+        //   半部）。两种面板统一按屏幕可用高度的 50% 封顶，列表本身可滚动，矮一点反而更
+        //   好点。下限 200dp 兜底，避免设置窗口尺寸过小把面板压没。
+        val maxH = (sh * 0.5f).toInt()
+        val hRaw = (rect[3] - rect[1]).coerceAtMost(bottom)
+        val h = hRaw.coerceAtMost(maxH).coerceAtLeast(dp(200).coerceAtMost(bottom))
         val top = (bottom - h).coerceAtLeast(0)
 
         val title = if (mode == PanelMode.RECENTS) "最近任务" else "应用"
