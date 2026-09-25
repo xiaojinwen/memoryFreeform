@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 深色模式下启动预览窗底色=黑，开屏动效不再整屏泛白 -->
+    <color name="windowBackground">#FF000000</color>
+</resources>

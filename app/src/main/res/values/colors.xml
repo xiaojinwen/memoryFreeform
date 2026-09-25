@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- 旧的纯色图标背景（#2196F3）已废弃：图标改为 ic_launcher_background 渐变 + 专属前景 -->
+
+    <!-- 启动预览窗底色：日间=白、夜间=黑（见 values-night/colors.xml），
+         消除桌面点击开屏时整屏白的闪屏动效。 -->
+    <color name="windowBackground">#FFFFFFFF</color>
 </resources>
