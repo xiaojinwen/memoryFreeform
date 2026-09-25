@@ -13,7 +13,9 @@
   - `origin` = `git@gitee.com:xiaojinwen/memory-freeform.git`（旧 `single-hand-mode` 弃用，默认分支 master）
   - `github` = `git@github.com:xiaojinwen/memoryFreeform.git`（默认分支**仍需用户在网页端改成 master**，
     main 因是默认分支删不掉；本机没装 gh CLI，改不了）
-  主分支 = **master**，本地 ↔ origin/master ↔ github/master 三者一致。
+  ★★ **推送映射（本地单一 master）**：`git config remote.github.push refs/heads/master:refs/heads/main`。
+  于是 **`git push origin` → gitee 的 master，`git push github` → github 的 main**，本地只维护一个
+  master 分支，不用维护两份分支名。github 默认分支保持 main（正好自洽），gitee 默认分支是 master。
   旧 .git 备份在 `E:\project\single-hand-mode-git-backup-20260925`（可删）。
   提交照旧：`git add <文件>` + `git commit -m "fixNN: 中文摘要"` + `git push`（一次推两远端）。
   ⚠ GitHub 首次连不上报 `Host key verification failed` ⇒ `ssh-keyscan -H github.com >> ~/.ssh/known_hosts`。
