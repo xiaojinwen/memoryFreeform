@@ -9,6 +9,15 @@
 > 已删功能的旧实现一律追溯 git 提交历史，不再留在记忆里。
 > ⚠ 架构已于 fix36 整体改轨：自造窗口那一套全部删除（git 历史可查），现行方案见「核心机制」一节。
 
+★ 2026-09-25 仓库迁移：git 历史已清空重建（旧 205 提交作废）。**双远端 + master 主分支**（main 已废弃删除）：
+  - `origin` = `git@gitee.com:xiaojinwen/memory-freeform.git`（旧 `single-hand-mode` 弃用，默认分支 master）
+  - `github` = `git@github.com:xiaojinwen/memoryFreeform.git`（默认分支**仍需用户在网页端改成 master**，
+    main 因是默认分支删不掉；本机没装 gh CLI，改不了）
+  主分支 = **master**，本地 ↔ origin/master ↔ github/master 三者一致。
+  旧 .git 备份在 `E:\project\single-hand-mode-git-backup-20260925`（可删）。
+  提交照旧：`git add <文件>` + `git commit -m "fixNN: 中文摘要"` + `git push`（一次推两远端）。
+  ⚠ GitHub 首次连不上报 `Host key verification failed` ⇒ `ssh-keyscan -H github.com >> ~/.ssh/known_hosts`。
+
 ## 构建 / 提交 / 环境
 - `./gradlew.bat :app:assembleDebug`（JAVA_HOME=C:\Users\23123\.jdks\jbr-21.0.11、ANDROID_HOME=…\Android\Sdk）
   → 拷 `E:\搬家文件夹\singlehand-fixNN.apk` → 提交信息写 `.workbuddy/.commit-msg-NN.txt` →
