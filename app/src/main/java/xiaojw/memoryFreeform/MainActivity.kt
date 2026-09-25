@@ -25,6 +25,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
@@ -39,6 +40,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.TextFieldValue
@@ -69,6 +71,7 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.basic.TextField
 import top.yukonga.miuix.kmp.basic.TextButton
 import top.yukonga.miuix.kmp.basic.TopAppBar
+import top.yukonga.miuix.kmp.basic.MiuixScrollBehavior
 import top.yukonga.miuix.kmp.extra.SuperArrow
 import top.yukonga.miuix.kmp.extra.SuperSwitch
 import top.yukonga.miuix.kmp.extra.WindowDialog
@@ -260,11 +263,15 @@ private fun HomePage(
     onRefresh: () -> Unit,
     onLongPress: (LaunchableApp?) -> Unit
 ) {
+    // ★ fix135：TopAppBar 的 largeTitle「记忆小窗」随应用列表上滑收起（collapsing toolbar）。
+    //   MiuixScrollBehavior + nestedScroll 把列表滚动接到 TopAppBar：上滑即收、下拉回弹。
+    val scrollBehavior = MiuixScrollBehavior()
     Scaffold(
         topBar = {
             TopAppBar(
                 title = "记忆小窗",
                 largeTitle = "记忆小窗",
+                scrollBehavior = scrollBehavior,
                 actions = {
                     IconButton(onClick = onRefresh) { Icon(Icons.Default.Refresh, "刷新") }
                     IconButton(onClick = onSettings) { Icon(Icons.Default.Settings, "设置") }
@@ -272,39 +279,45 @@ private fun HomePage(
             )
         }
     ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize()) {
-            TextField(
-                value = query,
-                onValueChange = onQuery,
-                insideMargin = DpSize(16.dp, 12.dp),
-                // 搜索图标离左边太近：在组件自带 16dp 内边距上再让 4dp
-                leadingIcon = { Icon(MiuixIcons.Search, null, Modifier.padding(start = 10.dp)) },
-                trailingIcon = {
-                    if (query.text.isNotEmpty()) {
-                        IconButton(onClick = { onQuery(TextFieldValue("")) }) { Icon(Icons.Default.Close, "清空") }
+        if (loading) {
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                Text("加载中…", color = MiuixTheme.colorScheme.onBackgroundVariant)
+            }
+        } else {
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(84.dp),
+                contentPadding = PaddingValues(12.dp),
+                // 把列表滚动接到 TopAppBar：上滑收起 largeTitle，下拉回弹展开
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(padding)
+                    .nestedScroll(scrollBehavior.nestedScrollConnection)
+            ) {
+                // 搜索框 + 提示随列表一起上滑（避免 largeTitle 收起后顶部留空洞）
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Column {
+                        TextField(
+                            value = query,
+                            onValueChange = onQuery,
+                            insideMargin = DpSize(16.dp, 12.dp),
+                            leadingIcon = { Icon(MiuixIcons.Search, null, Modifier.padding(start = 10.dp)) },
+                            trailingIcon = {
+                                if (query.text.isNotEmpty()) {
+                                    IconButton(onClick = { onQuery(TextFieldValue("")) }) { Icon(Icons.Default.Close, "清空") }
+                                }
+                            },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                        )
+                        SmallTitle("长按应用图标可清除它记住的小窗位置和大小")
                     }
-                },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
-            )
-            SmallTitle("长按应用图标可清除它记住的小窗位置和大小")
-            if (loading) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("加载中…", color = MiuixTheme.colorScheme.onBackgroundVariant)
                 }
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(84.dp),
-                    contentPadding = PaddingValues(12.dp),
-                    modifier = Modifier.fillMaxSize()
-                ) {
-                    item {
-                        // 长按它 = 清空全部位置记忆（target=null 走"清空全部"弹窗）
-                        AppTile(null, "全部位置记忆", onLongPress)
-                    }
-                    items(apps, key = { it.packageName }) { app ->
-                        AppTile(app, app.label, onLongPress)
-                    }
+                // 长按它 = 清空全部位置记忆（target=null 走"清空全部"弹窗）
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    AppTile(null, "全部位置记忆", onLongPress)
+                }
+                items(apps, key = { it.packageName }) { app ->
+                    AppTile(app, app.label, onLongPress)
                 }
             }
         }
