@@ -1,7 +1,17 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// ★ APK 签名：从项目根目录 keystore.properties 读取（该文件含密码，已被 .gitignore 忽略）。
+//   密钥库在 E:\project\apk-keys\app.jks，别名 xjwkey。debug / release 统一用同一签名，
+//   保证 assembleDebug 与 assembleRelease 产物可互相覆盖安装（adb install -r）。
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
 }
 
 android {
@@ -16,14 +26,45 @@ android {
         // 版本号约定：每次 fix 提交递增；versionCode 取 fix 序号（单调递增，Android 升级要求更大），
         // versionName 用 "1.0.<fix号>"，便于从设置/APK 名识别当前装的版本。
         //   fix65 -> 65 / "1.0.65"；fix66 -> 66 / "1.0.66"；fix67 -> 67 / "1.0.67"，以此类推。
-        versionCode = 140
-        versionName = "1.0.140"
+        versionCode = 142
+        versionName = "1.0.142"
+    }
+
+    signingConfigs {
+        if (keystoreProps["storeFile"] != null) {
+            create("release") {
+                storeFile = file(keystoreProps["storeFile"] as String)
+                storePassword = keystoreProps["storePassword"] as String
+                keyAlias = keystoreProps["keyAlias"] as String
+                keyPassword = keystoreProps["keyPassword"] as String
+            }
+        }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (keystoreProps["storeFile"] != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+        debug {
+            // debug 也用正式签名，避免与已安装的 release 包签名不一致导致覆盖安装失败
+            if (keystoreProps["storeFile"] != null) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+    }
+
+    // ★ APK 输出文件名统一为 memory-freeform_<版本号>.apk（debug / release 均生效）。
+    //   debug 包带 -debug 后缀便于区分，如 memory-freeform_1.0.140.apk / memory-freeform_1.0.140-debug.apk。
+    applicationVariants.all {
+        outputs.all {
+            val variantName = this@all.name
+            val suffix = if (variantName.equals("debug", ignoreCase = true)) "-debug" else ""
+            (this as? com.android.build.gradle.internal.api.BaseVariantOutputImpl)
+                ?.outputFileName = "memory-freeform_${defaultConfig.versionName}${suffix}.apk"
         }
     }
 

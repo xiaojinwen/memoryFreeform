@@ -53,8 +53,12 @@ data class AppState(
      * 同时参与两件事：窗口的 y 落点，以及 [WindowSizing.resolve] 里"可用高度"的上限。
      */
     val bottomGapPx: Int = 0,
-    /** 悬浮球开关（持久化） */
-    val floatBallEnabled: Boolean = true,
+    /**
+     * 悬浮球开关（持久化）。
+     * ★ fix141：默认**关** —— 悬浮球是常驻浮层，装完就默认挂一个球在屏上太打扰；
+     *   需要的人自己在设置里打开（打开时会顺带检查悬浮窗权限）。
+     */
+    val floatBallEnabled: Boolean = false,
     /**
      * ★ 1.0.102：悬浮球菜单的交互方式（持久化）。
      * false = 点击展开（默认）：点一下弹菜单，再点收起；
@@ -86,7 +90,7 @@ data class AppState(
      * 开（默认）= 位置 + 大小一起记，拉伸过的尺寸下次打开能恢复（用户明确期望）；
      * 关 = 只记位置，尺寸永远按设置走（改尺寸设置立刻对所有 App 生效、且不清位置记忆）。
      */
-    val rememberWindowSize: Boolean = true,
+    val rememberWindowSize: Boolean = false,
     /** 最近一次开进小窗的目标，供悬浮球一键复现 */
     val lastPackage: String? = null,
     val lastActivity: String? = null
@@ -108,7 +112,7 @@ object StateManager {
     private const val KEY_BALL_SLIDE = "float_ball_slide_mode"
     /** ★ fix137：悬浮球空闲自动贴边（默认 true = 开） */
     private const val KEY_AUTO_DOCK = "float_ball_auto_dock"
-    /** ★ fix88 加 / ★ fix91：记不记小窗大小（默认 true = 位置+大小都记） */
+    /** ★ fix88 加 / ★ fix91 默认开 / ★ fix142 改回默认关：记不记小窗大小 */
     private const val KEY_REMEMBER_SIZE = "remember_window_size"
     private const val KEY_LAST_PKG = "last_package"
     private const val KEY_LAST_ACT = "last_activity"
@@ -150,10 +154,12 @@ object StateManager {
             layerScale = WindowSizing.MIUI_LAYER_SCALE,
             corner = runCatching { Corner.valueOf(p.getString(KEY_CORNER, Corner.RIGHT.name)!!) }.getOrDefault(Corner.RIGHT),
             bottomGapPx = readBottomGap(p, context),
-            floatBallEnabled = p.getBoolean(KEY_BALL, true),
+            // ★ fix141：默认关（旧版默认 true，已存过值的老用户不受影响）
+            floatBallEnabled = p.getBoolean(KEY_BALL, false),
             floatBallSlideMode = p.getBoolean(KEY_BALL_SLIDE, false),
             autoDock = p.getBoolean(KEY_AUTO_DOCK, true),
-            rememberWindowSize = p.getBoolean(KEY_REMEMBER_SIZE, true),
+            // ★ fix142：默认关（fix91 曾改为默认开；老用户已存过值的不受影响）
+            rememberWindowSize = p.getBoolean(KEY_REMEMBER_SIZE, false),
             lastPackage = p.getString(KEY_LAST_PKG, null)?.takeIf { it.isNotEmpty() },
             lastActivity = p.getString(KEY_LAST_ACT, null)?.takeIf { it.isNotEmpty() }
         )

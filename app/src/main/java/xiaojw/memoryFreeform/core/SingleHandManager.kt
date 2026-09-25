@@ -102,7 +102,7 @@ class SingleHandManager(private val context: Context) {
     /**
      * ★ fix128：把「记住大小」开关写进 [HookContract.FLAGS_PATH]（hook 读）。
      * App 每次进程启动也要补写一次（见 [MemoryFreeformApp.onCreate]）——
-     * 重装 / 重启后文件可能缺失，缺失时 hook 按"开"处理。
+     * 重装 / 重启后文件可能缺失，缺失时 hook 按"关"处理（★ fix142 与开关默认值对齐）。
      */
     fun pushRememberSizeFlag(enabled: Boolean) {
         runCatching {

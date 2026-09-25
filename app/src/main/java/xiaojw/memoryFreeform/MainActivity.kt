@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.graphics.drawable.toBitmap
+import xiaojw.memoryFreeform.core.AppListPermission
 import xiaojw.memoryFreeform.core.AppState
 import xiaojw.memoryFreeform.core.HookBridge
 import xiaojw.memoryFreeform.core.SHLog
@@ -105,9 +106,26 @@ class MainActivity : ComponentActivity() {
         setContent { AppTheme { SingleHandUi(manager, root) } }
     }
 
+    /**
+     * ★ fix141：是否需要弹「获取应用列表」引导。
+     *
+     * 放在 Activity 里而不是 Compose 内部，是因为判据要在**每次回到前台**时重算
+     * （用户去授权页开完再回来，立刻就该变成"已授权"、弹窗不再出现）。
+     */
+    private var showAppListPermPrompt = mutableStateOf(false)
+
     override fun onResume() {
         super.onResume()
         syncFloatBall()
+        // 从授权页返回后重新判定：拿到了就不再弹
+        AppListPermission.refresh(this)
+        showAppListPermPrompt.value = AppListPermission.shouldPrompt(this)
+    }
+
+    /** 关掉引导并记下"已弹过"（之后只在真的没权限时才再弹）。 */
+    private fun dismissAppListPermPrompt() {
+        AppListPermission.markPrompted(this)
+        showAppListPermPrompt.value = false
     }
 
     private fun syncFloatBall() {
@@ -243,6 +261,38 @@ class MainActivity : ComponentActivity() {
                         },
                         modifier = Modifier.weight(1f)
                     ) { Text("清空") }
+                }
+            }
+
+            // ★ fix141：没拿到「获取应用列表」权限时的授权引导。
+            //   这个权限没有标准的运行时申请框，只能把用户送去授权页；不给的话主页
+            //   应用列表会是空的（系统把包列表过滤掉了），所以打开应用就先问一次。
+            WindowDialog(
+                show = showAppListPermPrompt.value,
+                title = "需要「获取应用列表」权限",
+                onDismissRequest = { dismissAppListPermPrompt() }
+            ) {
+                Text(
+                    "主页要列出手机上可开小窗的应用，需要「获取应用列表」权限。" +
+                        "没有它，列表会是空的。\n\n点「去开启」后在权限页把它设为允许，返回即可。",
+                    color = MiuixTheme.colorScheme.onBackgroundVariant
+                )
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 20.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    TextButton(
+                        text = "暂不",
+                        onClick = { dismissAppListPermPrompt() },
+                        modifier = Modifier.weight(1f)
+                    )
+                    Button(
+                        onClick = {
+                            dismissAppListPermPrompt()
+                            AppListPermission.openSettings(context)
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) { Text("去开启") }
                 }
             }
         }
@@ -475,6 +525,23 @@ private fun SettingsRoot(
                 rootReady = root.checkRoot()
                 Toast.makeText(context, if (rootReady) "Root 可用" else "Root 不可用", Toast.LENGTH_SHORT).show()
             }
+        )
+    }
+
+    // ★ fix141：「获取应用列表」权限 —— 主页应用列表全靠它，随时可以回到授权页改。
+    SmallTitle("权限")
+    Card(Modifier.padding(horizontal = 12.dp)) {
+        val appListGranted by AppListPermission.grantedFlow.collectAsState()
+        SuperArrow(
+            title = "获取应用列表",
+            summary = if (appListGranted) "已授权，主页可列出全部应用" else "未授权：主页应用列表会是空的，点此去开启",
+            endActions = {
+                Text(
+                    if (appListGranted) "已授权" else "未授权",
+                    color = MiuixTheme.colorScheme.onBackgroundVariant
+                )
+            },
+            onClick = { AppListPermission.openSettings(context) }
         )
     }
 

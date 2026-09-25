@@ -152,8 +152,9 @@ object HookContract {
      * 那一条路，主开窗链路上它什么也不管（用户观察到的"位置本来就会记"）。
      * 语义（用户定音）：**位置始终按记忆恢复；本开关只管大小** —— 关 = 大小用
      * 学得的系统默认（[DEFAULT_RECT_PATH]），开 = 位置和大小都按记忆。
-     * 文件缺失按开（true）处理 —— 与开关默认值一致，重装/重启后有自愈窗口
-     * （App 起来时会补写）。
+     * ★ fix142：文件缺失**按关（false）**处理 —— 与 App 侧开关默认值一致
+     * （fix128 定的是"缺失按开"，随开关默认改关一起翻转）。重装/重启后 App 起来
+     * 会补写真实值（[xiaojw.memoryFreeform.core.SingleHandManager.pushRememberSizeFlag]）。
      */
     const val FLAGS_PATH = "/data/system/memoryfreeform_flags"
 
@@ -161,14 +162,14 @@ object HookContract {
     private var flagAt = 0L
     private var flagRaw = ""
 
-    /** ★ fix128：[FLAGS_PATH] 里 `rememberSize` 的当前值（300ms 缓存；缺失 = true）。 */
+    /** ★ fix128 / ★ fix142：[FLAGS_PATH] 里 `rememberSize` 的当前值（300ms 缓存；缺失 = false）。 */
     fun rememberSizeEnabled(): Boolean = synchronized(this) {
         val now = System.currentTimeMillis()
         if (now - flagAt > 300) {
             flagAt = now
             flagRaw = runCatching { File(FLAGS_PATH).readText() }.getOrDefault("")
         }
-        var on = true
+        var on = false
         for (tok in flagRaw.split(Regex("\\s+"))) {
             val i = tok.indexOf('=')
             if (i > 0 && tok.substring(0, i) == "rememberSize") {

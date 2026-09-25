@@ -10,6 +10,7 @@
 # Gradle 构建输出与缓存
 build/
 app/build/
+app/release/
 .gradle/
 app/.cxx/
 captures/
