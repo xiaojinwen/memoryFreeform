@@ -290,6 +290,9 @@ object MiuiFreeFormBirthHook {
             stat.applied.incrementAndGet()
             written.incrementAndGet()
             lastRect = "${rect.left},${rect.top},${rect.right},${rect.bottom}"
+            // ★ fix144：出生几何是我们硬写的，窗口因此"出生即最终尺寸"，MIUI 的入场动画
+            //   就只剩圆角从 0 补到 67.14 那一段（= 四角闪直角）。通知圆角维持器开时间窗。
+            FreeformCornerKeeperHook.markBirth()
             log("applied via ${site.label} pkg=$lastPkg rect=$rect")
         } else {
             skip(stat, site, "write-failed")

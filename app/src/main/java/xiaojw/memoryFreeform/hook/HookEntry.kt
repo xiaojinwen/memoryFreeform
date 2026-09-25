@@ -75,6 +75,9 @@ class HookEntry : IXposedHookLoadPackage {
             // ★ fix66：把"小窗位置记录"从 App 进程搬进 system_server —— 不管谁开的窗、
             //   不管 App 在不在，拖完/缩放完/关窗时直接落盘，不必每秒轮询。
             MiuiFreeformRecordHook.install(lpparam)
+            // ★ fix144：小窗入场动画的圆角补间（0 → 67.14）在 SystemUI 里做，本机拿不到
+            //   SystemUI 作用域，改在 system_server 侧抢到 leash 后用高频写入把圆角钉死。
+            FreeformCornerKeeperHook.install(lpparam)
             // ★ fix87：`FreeformScaleProbeHook`（fix73 的临时 scale 探针，7 个挂点、只观察不改值）
             //   已删除 —— 缩放中和路线在 fix72 就废了，比例改由设置项 `layerScale` 直接配置，
             //   探针留着只是给 MIUI 的 scale 读写点白挂 7 个 inline hook。

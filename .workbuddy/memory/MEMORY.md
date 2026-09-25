@@ -72,9 +72,17 @@
 - 圆角=SurfaceFlinger 图层属性 `roundedCorner`，稳定值 **67.1429 = 47/0.70**（47px=18dp）。
 - 入场从 ~0 补间到 67.14（~500ms）是澎湃设计的动画，在 SystemUI WMShell
   `MiuiFreeformModeAnimation` folme（冷开 type13 / 全屏转小窗 type16）。
-- 修法：`hook/FreeformCornerHook.kt` 装 **com.android.systemui** 拦 `MultiTaskingFolmeState.addProperty`
-  令起点=终点。⚠ 需用户在 LSPosed 手动勾 systemui 作用域并重启。开关 `memoryfreeform_corner.off`；
-  自检 `/data/system/memoryfreeform_corner.state`。取证：`dumpsys SurfaceFlinger | grep roundedCorner`。
+- 修法：`hook/FreeformCornerHook.kt` 装 **com.android.systemui**，两条腿：
+  ① 拦 `MultiTaskingFolmeState.addProperty` 令起点=终点（依赖 MIUI 私有签名，可能挂空）；
+  ② fix143 兜底：拦 `SurfaceControl$Transaction.setCornerRadius`，只抬**递增**段
+  （入场 0→67）+ 栈含 miuifreeform/multitasking；递减段（关闭/缩迷你窗）放行。
+- ★★ **LSPosed 作用域必须用 resource 数组形式才会预勾**：`xposedscope` =
+  `@array/xposed_scope`（`res/values/arrays.xml`：android + com.android.systemui）。
+  字符串 value LSPosed 不解析 = 没声明（fix140 就是这么翻车的）。
+  排查：`cat /data/adb/lspd/log/modules_*.log | grep "installed in"`。
+- 开关 `memoryfreeform_corner.off`；自检 `/data/system/memoryfreeform_corner.state`
+  （字段 installed/clampSites/snap/fromTo/clamped/stable）。
+  取证：`dumpsys SurfaceFlinger | grep roundedCorner`。
 
 ## 近期版本（更早的看 git 历史）
 - ★1.0.141：①**悬浮球默认关**（AppState.floatBallEnabled 默认 false + prefs 默认 false，老用户已存值不受影响）。
