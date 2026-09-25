@@ -219,13 +219,16 @@ class MainActivity : ComponentActivity() {
                     },
                     color = MiuixTheme.colorScheme.onBackgroundVariant
                 )
+                // ★ fix136：两个按钮用 weight(1f) 均分（减去间距），不再各自 fillMaxWidth
+                //   导致 Row 里两个满宽子项冲突、按钮撑不开。
                 Row(
                     Modifier.fillMaxWidth().padding(top = 20.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     TextButton(
                         text = "取消",
-                        onClick = { showClear.value = false }
+                        onClick = { showClear.value = false },
+                        modifier = Modifier.weight(1f)
                     )
                     Button(
                         onClick = {
@@ -237,7 +240,8 @@ class MainActivity : ComponentActivity() {
                                 Toast.makeText(context, "已清空「${target.label}」的位置记忆", Toast.LENGTH_SHORT).show()
                             }
                             showClear.value = false
-                        }
+                        },
+                        modifier = Modifier.weight(1f)
                     ) { Text("清空") }
                 }
             }
