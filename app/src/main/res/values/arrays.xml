@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- LSPosed 模块作用域（推荐值）：LSPosed 读 xposedscope 资源时会把这里列的包
+         预勾上，用户只需更新模块后重启即可，不必手动去作用域列表里找。
+          - android              = system_server：小窗出生尺寸/记忆/手势条钩子（主线）
+          - com.android.systemui = WMShell：小窗圆角入场补间修复（fix140/fix143）
+         两者缺一不可：圆角补间是 SystemUI 里的 folme 动画做的，只在 system_server
+         里挂钩子够不着它。 -->
+    <string-array name="xposed_scope" translatable="false">
+        <item>android</item>
+        <item>com.android.systemui</item>
+    </string-array>
+</resources>

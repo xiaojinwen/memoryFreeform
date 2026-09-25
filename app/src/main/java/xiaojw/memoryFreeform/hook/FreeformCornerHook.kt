@@ -54,16 +54,30 @@ import java.io.File
  * 也就是说：**这是澎湃给"打开小窗"设计的入场动画的一部分，任何方式开小窗都会走**，
  * 不是我们 `am start-activity --windowingMode 5` 引入的。
  *
- * ## 修法
+ * ## 修法（两条腿，互为兜底）
  *
- * 让 `FOLME_RADIUS` 的**起点等于终点**，圆角就全程是最终值（屏幕上恒定 47px）：
+ * 1. **主**：让 `FOLME_RADIUS` 的**起点等于终点**，圆角全程是最终值：
+ *     - 三/四参 `addProperty(prop, from, to[, ease])`：`prop == FOLME_RADIUS && from <= 0 && to > 0`
+ *       ⇒ 把 `from` 改成 `to`（补间退化成常量）；
+ *     - 两参 `addProperty(prop, to)`（单值重载）：先把 `mFolmeControl` 的当前值
+ *       `setFolmeRadius(to)` 顶上去，动画就变成 47 → 47。
  *
- *  - 三/四参 `addProperty(prop, from, to[, ease])`：`prop == FOLME_RADIUS && from <= 0 && to > 0`
- *    ⇒ 把 `from` 改成 `to`（补间退化成常量）；
- *  - 两参 `addProperty(prop, to)`（单值重载）：先把 `mFolmeControl` 的当前值
- *    `setFolmeRadius(to)` 顶上去，动画就变成 47 → 47。
+ *    `startMoveToFrontAnimation` 走的是第二种，所以两条都得挂。
  *
- * `startMoveToFrontAnimation` 走的正是第二种，所以两条都必须挂。
+ * 2. **兜底**（fix143 新增）：直接挂 `SurfaceControl.Transaction.setCornerRadius`。
+ *    上面那条依赖 folme 类的签名，ROM 一改就挂空；这条只认 framework 方法，稳得多。
+ *    判据用「原始值递增 + 调用栈是 MIUI 小窗动画」：
+ *     - 只抬**递增**的那一段（0→5→20→33→50→67 是入场），关闭/缩迷你窗是递减
+ *       （47→12），一律不碰，所以不会破坏退出动画；
+ *     - 抬的目标 = 18dp / 0.70（density 现算），并且自适应：凡是"已经够大"的帧就
+ *       把它记为 stable，下次以 stable 为准，ROM 换数值也不会抬错。
+ *
+ * ## 作用域（fix143 关键修正）
+ *
+ * fix140 只在代码里装了钩子，**没在 manifest 声明 SystemUI**，LSPosed 里得用户手动勾
+ * 作用域，实测用户没勾 ⇒ 钩子一行都没跑、自检文件都没生成。现在 `xposedscope` 改成
+ * `@array/xposed_scope`（android + com.android.systemui），LSPosed 会预勾，
+ * 更新模块后重启即可。
  *
  * ## 铁律（与 [MiuiFreeFormBirthHook] 同款）
  *
@@ -72,10 +86,6 @@ import java.io.File
  *    一个点，不会炸；
  *  - 全程 `runCatching`：SystemUI 是桌面/Shell 的宿主进程，这里出任何异常都必须静默；
  *  - 救命开关 [HookContract.CORNER_OFF_PATH] 存在时一个点都不挂（不影响 system_server 那两个钩子）。
- *
- * ⚠ 需要用户在 LSPosed 里给本模块**勾选 `com.android.systemui` 作用域并重启**
- *   （模块 manifest 的 `xposedscope` 仍只声明 `android`，SystemUI 要手动加 ——
- *   不敢改声明是为了避免解析失败把现有作用域弄丢）。没勾就不会生效，也不会有副作用。
  */
 object FreeformCornerHook {
 
@@ -91,6 +101,11 @@ object FreeformCornerHook {
     @Volatile private var installed = 0
     @Volatile private var snap = 0
     @Volatile private var fromTo = 0
+    /** 兜底（setCornerRadius）成功抬升的帧数。 */
+    @Volatile private var clamped = 0
+    @Volatile private var clampSites = 0
+    /** 自适应学到的稳定圆角（图层空间值，实测 67.14）。 */
+    @Volatile private var stable = 0f
     @Volatile private var lastMsg = "-"
 
     fun install(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -100,53 +115,152 @@ object FreeformCornerHook {
                 log(lastMsg)
                 return
             }
-            val stateCls = runCatching { XposedHelpers.findClass(STATE_CLS, lpparam.classLoader) }
-                .getOrNull()
-            if (stateCls == null) {
-                lastMsg = "state class not found"
-                log(lastMsg)
-                return
-            }
-            val ctrlCls = runCatching { XposedHelpers.findClass(CTRL_CLS, lpparam.classLoader) }
-                .getOrNull()
-            val radiusProp = ctrlCls?.let {
-                runCatching { XposedHelpers.getStaticObjectField(it, "FOLME_RADIUS") }.getOrNull()
-            }
-            if (radiusProp == null) {
-                lastMsg = "FOLME_RADIUS not found"
-                log(lastMsg)
-                return
-            }
+            val msgs = ArrayList<String>(3)
 
-            var n = 0
-            for (m in stateCls.declaredMethods) {
-                if (m.name != "addProperty") continue
-                val ps = m.parameterTypes
-                // 只认「第一个参数是 ValueProperty（对象、非 String），第二个是 float」的形态
-                if (ps.size < 2) continue
-                if (ps[0].isPrimitive || ps[0] == String::class.java) continue
-                if (ps[1] != java.lang.Float.TYPE) continue
-                // from/to 形态 = 第三个参数也是 float；单值形态 = 后面跟 ease/config
-                val hasTo = ps.size >= 3 && ps[2] == java.lang.Float.TYPE
-                if (!hasTo && ps.size > 4) continue
-                runCatching { m.isAccessible = true }
-                runCatching {
-                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
-                        override fun beforeHookedMethod(param: MethodHookParam) {
-                            runCatching { fix(param, radiusProp, hasTo) }
-                        }
-                    })
-                    n++
-                }.onFailure { lastMsg = "hook failed ${m.name}/${ps.size}: ${it.message}" }
-            }
-            installed = n
-            lastMsg = if (n > 0) "installed $n site(s)" else "no addProperty matched"
+            // ① 主方案：folme 动画起点抬到终点
+            runCatching { installFolme(lpparam, msgs) }
+                .onFailure { msgs += "folme failed: ${it.message}" }
+
+            // ② 兜底：直接钳 Transaction.setCornerRadius（不依赖 folme 签名）
+            runCatching { installRadiusClamp(lpparam, msgs) }
+                .onFailure { msgs += "clamp failed: ${it.message}" }
+
+            lastMsg = msgs.joinToString(" | ").ifEmpty { "nothing installed" }
             log(lastMsg)
-            if (n > 0) startFlusher()
+            // 只要有一个点挂上就开自检落盘；两个都没挂也落盘，方便排查作用域问题
+            startFlusher()
         }.onFailure {
             lastMsg = "install failed: ${it.message}"
             log(lastMsg)
         }
+    }
+
+    private fun installFolme(lpparam: XC_LoadPackage.LoadPackageParam, msgs: ArrayList<String>) {
+        val stateCls = runCatching { XposedHelpers.findClass(STATE_CLS, lpparam.classLoader) }
+            .getOrNull()
+        if (stateCls == null) {
+            msgs += "state class not found"
+            return
+        }
+        val ctrlCls = runCatching { XposedHelpers.findClass(CTRL_CLS, lpparam.classLoader) }
+            .getOrNull()
+        val radiusProp = ctrlCls?.let {
+            runCatching { XposedHelpers.getStaticObjectField(it, "FOLME_RADIUS") }.getOrNull()
+        }
+        if (radiusProp == null) {
+            msgs += "FOLME_RADIUS not found"
+            return
+        }
+
+        var n = 0
+        for (m in stateCls.declaredMethods) {
+            if (m.name != "addProperty") continue
+            val ps = m.parameterTypes
+            // 只认「第一个参数是 ValueProperty（对象、非 String），第二个是 float」的形态
+            if (ps.size < 2) continue
+            if (ps[0].isPrimitive || ps[0] == String::class.java) continue
+            if (ps[1] != java.lang.Float.TYPE) continue
+            // from/to 形态 = 第三个参数也是 float；单值形态 = 后面跟 ease/config
+            val hasTo = ps.size >= 3 && ps[2] == java.lang.Float.TYPE
+            if (!hasTo && ps.size > 4) continue
+            runCatching { m.isAccessible = true }
+            runCatching {
+                XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        runCatching { fix(param, radiusProp, hasTo) }
+                    }
+                })
+                n++
+            }.onFailure { msgs += "hook failed ${m.name}/${ps.size}" }
+        }
+        installed = n
+        msgs += if (n > 0) "folme $n site(s)" else "no addProperty matched"
+    }
+
+    /**
+     * 兜底：挂 `android.view.SurfaceControl$Transaction.setCornerRadius`。
+     *
+     * 只对「MIUI 小窗入场动画里的递增帧」生效，抬到最终圆角；递减帧（关闭、缩迷你窗）
+     * 一律放行，避免把退出动画搞坏。
+     */
+    private fun installRadiusClamp(lpparam: XC_LoadPackage.LoadPackageParam, msgs: ArrayList<String>) {
+        val txnCls = runCatching {
+            XposedHelpers.findClass("android.view.SurfaceControl\$Transaction", lpparam.classLoader)
+        }.getOrNull()
+        if (txnCls == null) {
+            msgs += "Transaction not found"
+            return
+        }
+        var n = 0
+        for (m in txnCls.declaredMethods) {
+            if (m.name != "setCornerRadius" && m.name != "setCornerRadii") continue
+            val ps = m.parameterTypes
+            if (ps.size < 2) continue
+            if (ps[0].name != "android.view.SurfaceControl") continue
+            if (ps[1] != java.lang.Float.TYPE) continue
+            runCatching { m.isAccessible = true }
+            runCatching {
+                XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                    override fun beforeHookedMethod(param: MethodHookParam) {
+                        runCatching { clamp(param) }
+                    }
+                })
+                n++
+            }.onFailure { msgs += "clamp hook failed ${m.name}/${ps.size}" }
+        }
+        clampSites = n
+        msgs += if (n > 0) "clamp $n site(s)" else "no setCornerRadius matched"
+    }
+
+    /** 每个 SurfaceControl 上一次见到的「原始」圆角值（不是改写后的值）。 */
+    private val lastRawLock = Any()
+    private val lastRaw = java.util.WeakHashMap<Any, Float>()
+
+    private fun clamp(param: XC_MethodHook.MethodHookParam) {
+        val raw = param.args[1] as? Float ?: return
+        val sc = param.args[0] ?: return
+        val prev: Float?
+        synchronized(lastRawLock) {
+            prev = lastRaw.put(sc, raw)
+        }
+        if (raw <= 0f) return   // 0 = 主动清圆角（退出动画收尾 / 全屏），不动它
+        val target = stable.takeIf { it > 0f } ?: defaultTarget()
+        if (raw >= target * 0.95f) {
+            // 已经够大：这就是稳定值，记下来供以后自适应
+            if (raw > stable) stable = raw
+            return
+        }
+        // 只抬递增段（入场 0→5→20→33→…→67）；递减段是关闭/缩迷你窗，放行
+        if (prev != null && raw <= prev) return
+        if (!isFreeformAnimStack()) return
+        param.args[1] = target
+        clamped++
+    }
+
+    /** 终值 = 18dp / 0.70（18dp 是 MIUI 写死的，0.70 是 freeform 固定图层缩放）。 */
+    private fun defaultTarget(): Float {
+        val density = runCatching { android.content.res.Resources.getSystem().displayMetrics.density }
+            .getOrDefault(2.625f)
+        return 18f * density / 0.70f
+    }
+
+    /**
+     * 调用栈里有没有 MIUI 小窗动画 —— 有才敢钳，避免误伤别处（比如气泡、PIP、桌面）
+     * 的圆角动画。
+     */
+    private fun isFreeformAnimStack(): Boolean {
+        val st = runCatching { Thread.currentThread().stackTrace }.getOrNull() ?: return false
+        // 只扫最近 12 帧，够盖住 folme/动画回调，开销也可控
+        val limit = kotlin.math.min(st.size, 12)
+        for (i in 0 until limit) {
+            val cn = st[i].className
+            if (cn.contains("miuifreeform", true) ||
+                cn.contains("MiuiFreeForm", true) ||
+                cn.contains("multitasking", true) ||
+                cn.contains("MultiTasking", true)
+            ) return true
+        }
+        return false
     }
 
     /**
@@ -184,7 +298,8 @@ object FreeformCornerHook {
                     val f = File(HookContract.CORNER_STATE_PATH)
                     val tmp = File(HookContract.CORNER_STATE_PATH + ".tmp")
                     tmp.writeText(
-                        "installed=$installed snap=$snap fromTo=$fromTo msg=$lastMsg\n"
+                        "installed=$installed clampSites=$clampSites snap=$snap fromTo=$fromTo " +
+                            "clamped=$clamped stable=$stable msg=$lastMsg\n"
                     )
                     runCatching { tmp.setReadable(true, false) }
                     tmp.renameTo(f)

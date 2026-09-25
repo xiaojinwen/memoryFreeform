@@ -15,12 +15,13 @@
         android:theme="@style/Theme.MemoryFreeform"
         android:supportsRtl="true">
 
-        <!-- LSPosed 模块声明：作用域为系统框架（system_server） -->
+        <!-- LSPosed 模块声明：作用域见 @array/xposed_scope（android + com.android.systemui）。
+             注意必须用 resource 数组形式，LSPosed 才会预勾；纯字符串 value 它不认。 -->
         <meta-data android:name="xposedmodule" android:value="true" />
         <meta-data android:name="xposeddescription"
             android:value="记忆小窗：让新打开的页面直接在小窗内启动，并记住每个小窗的位置与大小" />
         <meta-data android:name="xposedminversion" android:value="93" />
-        <meta-data android:name="xposedscope" android:value="android" />
+        <meta-data android:name="xposedscope" android:resource="@array/xposed_scope" />
 
         <!-- adjustNothing：小窗开启期间本页会整体退到后台，键盘不该改本窗口布局
              （否则退居后台之前那一瞬会被顶起来，露出应用列表）。 -->

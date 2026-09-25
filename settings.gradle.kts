@@ -19,5 +19,5 @@ dependencyResolutionManagement {
         maven("https://api.xposed.info/")
     }
 }
-rootProject.name = "SingleHandMode"
+rootProject.name = "memoryFreeform"
 include(":app")

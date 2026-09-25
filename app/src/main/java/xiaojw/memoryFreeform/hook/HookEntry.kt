@@ -94,8 +94,10 @@ class HookEntry : IXposedHookLoadPackage {
      *  - 总闸 [HookContract.KILL_SWITCH_PATH] 存在时不装；
      *  - 找不到 folme 那两个类 / `FOLME_RADIUS` 字段时直接放弃（ROM 改了就不生效，不崩）。
      *
-     * ⚠ 需要在 LSPosed 里手动给本模块勾选 `com.android.systemui` 作用域并重启
-     *   （manifest 的 `xposedscope` 只声明了 `android`）。没勾 = 完全不生效、无副作用。
+     * ⚠ fix140 时只声明了 `android`，结果 SystemUI 得用户手动勾作用域 —— 实测用户没勾，
+     *   钩子一行都没跑（自检文件都没生成）。fix143 起 `xposedscope` 改成
+     *   `@array/xposed_scope`（android + com.android.systemui），LSPosed 会预勾，
+     *   更新模块后只要重启即可。
      */
     private fun installSystemUi(lpparam: XC_LoadPackage.LoadPackageParam) {
         runCatching {
