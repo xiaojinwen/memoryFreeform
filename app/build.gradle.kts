@@ -16,8 +16,8 @@ android {
         // 版本号约定：每次 fix 提交递增；versionCode 取 fix 序号（单调递增，Android 升级要求更大），
         // versionName 用 "1.0.<fix号>"，便于从设置/APK 名识别当前装的版本。
         //   fix65 -> 65 / "1.0.65"；fix66 -> 66 / "1.0.66"；fix67 -> 67 / "1.0.67"，以此类推。
-        versionCode = 132
-        versionName = "1.0.132"
+        versionCode = 133
+        versionName = "1.0.133"
     }
 
     buildTypes {

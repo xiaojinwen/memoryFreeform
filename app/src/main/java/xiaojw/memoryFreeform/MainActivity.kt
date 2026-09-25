@@ -11,12 +11,11 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.ExperimentalAnimationApi
 import androidx.compose.animation.SizeTransform
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
@@ -95,6 +94,9 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         manager = MemoryFreeformApp.instance.singleHandManager
         root = SingleHandManager.RootManagerRef.get(this)
+        // ★ fix133：沉浸式状态栏 —— 内容绘制到状态栏之下，状态栏图标浮在 TopAppBar 上；
+        //   状态栏/导航栏透明、图标深浅随系统深浅色自动处理（HyperOS 风格本就为边到边设计）。
+        enableEdgeToEdge()
         // 界面用 miuix（HyperOS 风格开源组件库）渲染；窗口底色交给主题自身，
         // 页面过渡时露出的永远是页面底色，不会闪黑。
         setContent { AppTheme { SingleHandUi(manager, root) } }
@@ -161,12 +163,10 @@ class MainActivity : ComponentActivity() {
                 targetState = settings,
                 transitionSpec = {
                     val dir = if (targetState) 1 else -1
-                    (
-                        slideInHorizontally(tween(260)) { it * dir } +
-                            fadeIn(tween(200, delayMillis = 60))
-                        ).togetherWith(
-                        slideOutHorizontally(tween(260)) { -it * dir } +
-                            fadeOut(tween(160))
+                    // ★ fix133：去掉淡入淡出 —— 进场/出场同时半透明叠加，过渡中会蒙一层暗影；
+                    //   现在纯水平滑动，干净不挡视线。
+                    slideInHorizontally(tween(260)) { it * dir }.togetherWith(
+                        slideOutHorizontally(tween(260)) { -it * dir }
                     )
                 },
                 label = "homeSettings"
@@ -409,12 +409,9 @@ private fun SettingsHost(
             targetState = nav.current,
             transitionSpec = {
                 val dir = if (nav.advancing) 1 else -1
-                (
-                    slideInHorizontally(tween(260)) { it * dir } +
-                        fadeIn(tween(200, delayMillis = 60))
-                    ).togetherWith(
-                    slideOutHorizontally(tween(260)) { -it * dir } +
-                        fadeOut(tween(160))
+                // ★ fix133：同上，去掉淡入淡出，纯滑动，避免过渡暗影。
+                slideInHorizontally(tween(260)) { it * dir }.togetherWith(
+                    slideOutHorizontally(tween(260)) { -it * dir }
                 ).using(SizeTransform(clip = true))
             },
             label = "settingsPage"
