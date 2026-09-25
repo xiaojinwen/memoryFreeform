@@ -696,27 +696,67 @@ class CornerWindowService : Service() {
             }
         }
         // ① 标题行 + ✕（自带关闭入口：面板能收系统返回了，但点 ✕ 永远最快）
-        card.addView(
-            android.widget.LinearLayout(this).apply {
-                orientation = android.widget.LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                setPadding(dp(14), dp(10), dp(8), dp(8))
-                addView(android.widget.TextView(this@CornerWindowService).apply {
-                    text = title
-                    setTextColor(0xFFEDEDED.toInt())
-                    textSize = 16f
-                }, android.widget.LinearLayout.LayoutParams(0, -2, 1f))
-                addView(android.widget.TextView(this@CornerWindowService).apply {
-                    text = "✕"
-                    setTextColor(0xFF9AA0A6.toInt())
-                    textSize = 18f
-                    gravity = Gravity.CENTER
-                    setPadding(dp(10), 0, dp(10), 0)
-                    isClickable = true
-                    setOnClickListener { dismissPanel() }
-                })
+        // ★ fix138：「标题栏下滑关闭」手势 —— 在桌面（launcher 是当前任务）下，系统边缘返回
+        //   手势会按"顶层任务"路由给桌面、落不到浮层面板，于是面板关不掉。给标题栏加一条
+        //   下滑手势：标题栏上向下拖过阈值松手 = 收起面板（带随手指下移的动画）。这是面板
+        //   自身的触摸手势、不依赖系统焦点，桌面 / 应用下行为一致；纯点按仍走 ✕ 的 onClick。
+        val titleRow = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(10), dp(8), dp(8))
+            addView(android.widget.TextView(this@CornerWindowService).apply {
+                text = title
+                setTextColor(0xFFEDEDED.toInt())
+                textSize = 16f
+            }, android.widget.LinearLayout.LayoutParams(0, -2, 1f))
+            addView(android.widget.TextView(this@CornerWindowService).apply {
+                text = "✕"
+                setTextColor(0xFF9AA0A6.toInt())
+                textSize = 18f
+                gravity = Gravity.CENTER
+                setPadding(dp(10), 0, dp(10), 0)
+                isClickable = true
+                setOnClickListener { dismissPanel() }
+            })
+        }
+        run {
+            val tSlop = android.view.ViewConfiguration.get(this).scaledTouchSlop
+            val dismissDist = dp(36)
+            var tDownX = 0f; var tDownY = 0f; var tSwiping = false
+            titleRow.setOnTouchListener { _, ev ->
+                when (ev.actionMasked) {
+                    android.view.MotionEvent.ACTION_DOWN -> {
+                        tDownX = ev.x; tDownY = ev.y; tSwiping = false; false
+                    }
+                    android.view.MotionEvent.ACTION_MOVE -> {
+                        val dx = ev.x - tDownX
+                        val dy = ev.y - tDownY
+                        if (!tSwiping && dy > tSlop * 2 && dy > kotlin.math.abs(dx)) {
+                            // 明显向下的拖拽 = 接管手势，避免误触发 ✕ 点击
+                            tSwiping = true
+                        }
+                        if (tSwiping) {
+                            card.translationY = maxOf(0f, dy)
+                            true
+                        } else false
+                    }
+                    android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                        if (tSwiping) {
+                            val dy = ev.y - tDownY
+                            card.translationY = 0f
+                            tSwiping = false
+                            if (dy >= dismissDist) {
+                                SHLog.i(TAG, "panel[$title]: 标题栏下滑 -> 收起面板")
+                                dismissPanel()
+                            }
+                            true
+                        } else false
+                    }
+                    else -> false
+                }
             }
-        )
+        }
+        card.addView(titleRow)
 
         val adapter = PanelAdapter { item -> pickPanelItem(item, title) }
 
