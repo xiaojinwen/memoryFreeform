@@ -61,7 +61,16 @@
   adoptExisting（判据 `WindowWatcher.lastTasks()`）。
 - 调试利器：`memoryfreeform_record.state(.moved)` 探针、反编译 services.jar（jadx 在 .workbuddy/tmp/rom/）。
 
-## 现状（1.0.130，2026-09-25）
+## 现状（1.0.131，2026-09-25）
+- ★★ 仓库历史已由用户清空重建（463cdec "迁移至 memory-freeform 远端"），fix 编号照旧。
+- ★★1.0.131（并入 463cdec）：①**关闭小窗竞态修复**——miuiTasks 靠 watcher ~2s 轮询登记，
+  开窗后几秒内点「关闭小窗」task 未登记 ⇒ onDestroy 收窗循环拿空列表跑 ⇒ 小窗孤儿
+  （真机日志实锤：选中应用→立刻关闭无 task removed 行）。修：onDestroy 按 exitPkg 现查
+  am stack list 补收未登记 task（Regex `taskId=(\d+): pkg/`）。②菜单删「切换角落」
+  （IC_SWITCH/⇄ 图标退役，EXTRA_SWITCH_CORNER 通道保留）。③最近任务面板高度 -50dp
+  （应用面板不变）+ 行横滑 ≥72dp 关闭该应用小窗（closeRecentTask 现查 stack list，
+  不依赖会话；bindPanelRow 必须复位 translationX 防复用串位）。④应用面板打开即
+  requestIme 聚焦搜索框。真机实测：1.4s 竞态关闭成功、mInputShown=true。
 - ★★1.0.130（c53a46c）：**悬浮球坐标域定论**——本机 overlay 布局 y 原点在状态栏下方，
   球/菜单容器 frame=attrs+108px（状态栏高），触摸 rawX/rawY 是绝对坐标。旧代码
   touchOnBall/命中圆用布局坐标 ⇒ 整体偏 108px：点球下半关不掉、滑动命中错位。
