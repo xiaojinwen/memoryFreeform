@@ -110,6 +110,11 @@ object FreeformCornerHook {
     @Volatile private var learned = 0
     /** 自适应学到的稳定圆角（图层空间值，实测 67.14）。 */
     @Volatile private var stable = 0f
+    /** 学习候选值：必须连续 N 帧落在候选附近才转正为 stable，避免一过冲峰被学成稳定值。 */
+    @Volatile private var candidate = 0f
+    @Volatile private var candidateCount = 0
+    private const val CANDIDATE_EPSILON = 0.1f
+    private const val CANDIDATE_NEED = 3
     @Volatile private var lastMsg = "-"
 
     fun install(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -243,28 +248,38 @@ object FreeformCornerHook {
             for (k in 1 until args.size) if (args[k] is Float) args[k] = target
         }
         when {
-            // ① 入场的头几帧：半径是 0（直角矩形）—— 这正是"闪一下直角"的来源，抬上去。
-            //    （退出动画收尾也会写 0，但那时 prev 一定存在且是递减，下面 ④ 放行）
+            // ① 半径是 0（直角矩形）—— 只要还在小窗动画栈里就全部抬到终值。
+            //    入场头几帧 folme 起点是 0；动画末尾 SystemUI 也可能 reset 写 0；
+            //    这两类都必须钳，否则用户会在动画末尾再闪一下直角。
+            //    （关闭/缩迷你窗的递减段写 0 也在这里被钳，但窗口正在消失，圆角保持终值比露方角好）
             raw <= 0f -> {
-                if (prev != null) return
                 if (!isFreeformAnimStack()) return
                 rewrite()
                 zeroFixed++
             }
-            // ② 看起来已经到位：记下来当基准 —— ★ 但不能超过设计值。
+            // ② 看起来已经到位：记下来当基准 —— ★ 但不能超过设计值，也不能把一过冲峰当 stable。
             //    folme 是弹簧动画，会**过冲**（实测冲到 70.88 再回落到 67.14），
-            //    早先这里无条件 `stable = max(stable, raw)`，把过冲值当成了稳定值，
-            //    结果圆角被永久钉成 70.88，比设计值大一圈（用户反馈"圆角有点奇怪"）。
-            //    现在只允许学到设计值以下，过冲帧一律不认。
-            //    fix147 给了 1.02 的余量，结果过冲峰值 68.83 < 67.5×1.02=68.85 又溜了进来，
-            //    stable 被学成 68.83（比设计值大 2.5%，仍被用户看出"圆角偏大"）。
-            //    ⇒ 余量去掉，直接用设计值当上限，过冲帧一律不认。
-            raw >= target * 0.95f -> {
+            //    早先 `stable = max(stable, raw)` 把过冲值当成稳定值 ⇒ 圆角被永久钉大一圈。
+            //    fix147/148 用上限 `defaultTarget()` 拦住了 70.88，但 67.49 这种紧贴上线的过冲仍会被
+            //    学成 stable（log 里 `stable=67.49067`），导致 target 偏高、系统真值 67.14 帧被放行。
+            //    现在要求候选值连续 3 帧一致（误差 <0.1）才转正，一过冲峰只存在 1~2 帧，自然被淘汰。
+            raw >= target * 0.99f -> {
                 val cap = defaultTarget()
                 val maxR = radii.maxOrNull() ?: raw
-                if (maxR in MIN_R..MAX_R && maxR <= cap && maxR > stable) {
-                    stable = maxR
-                    learned++
+                if (maxR in MIN_R..MAX_R && maxR <= cap) {
+                    if (stable <= 0f) {
+                        if (kotlin.math.abs(maxR - candidate) < CANDIDATE_EPSILON) {
+                            candidateCount++
+                        } else {
+                            candidate = maxR
+                            candidateCount = 1
+                        }
+                        if (candidateCount >= CANDIDATE_NEED) {
+                            stable = candidate
+                            candidateCount = 0
+                            learned++
+                        }
+                    }
                 }
             }
             // ③ 递增段（0→…→67 的入场）：抬到终值
@@ -337,7 +352,8 @@ object FreeformCornerHook {
                 runCatching { Thread.sleep(4_000L) }.getOrNull() ?: return@Thread
                 round++
                 val line = "installed=$installed clampSites=$clampSites snap=$snap fromTo=$fromTo " +
-                    "clamped=$clamped zero=$zeroFixed learned=$learned stable=$stable msg=$lastMsg"
+                    "clamped=$clamped zero=$zeroFixed learned=$learned stable=$stable " +
+                    "candidate=$candidate/${candidateCount} msg=$lastMsg"
                 // 自检文件（写不进去也不影响功能，错误只记一次）
                 runCatching {
                     val tmp = File(HookContract.CORNER_STATE_PATH + ".tmp")
