@@ -90,10 +90,15 @@
   ① 拦 `MultiTaskingFolmeState.addProperty` 令起点=终点（实测 `snap` 在涨，命中）；
   ② 兜底拦 `SurfaceControl$Transaction.setCornerRadius`，只抬**递增**段 + 栈含
   miuifreeform/multitasking；递减段（关闭/缩迷你窗）放行。
-  ★★ 兜底的自适应 `stable` **必须设上限 = defaultTarget()*1.02**：folme 是弹簧动画会
-  **过冲到 70.88**，无条件 `max()` 会把过冲值当稳定值 ⇒ 圆角被永久钉成 70.88（"圆角奇怪"）；
+  ★★ 兜底的自适应 `stable` 上限 = **defaultTarget()**（无余量）：fix147 用 *1.02(≈67.5)
+  仍让过冲峰值 68.83 溜进来（stable 学成 68.83，圆角偏大）；fix148 锁死设计值 67.1429。
+  folme 弹簧**过冲到 70.88**，无条件 `max()` 会把过冲值当稳定值 ⇒ 圆角被钉成 70.88；
   同理只认 **[30,120]** 区间的值，否则全屏动画的 235 会被学走（SF 显示 335.7）。
-  实测正解：stable=67.14286、clamped 持续增长、采样无个位数帧。
+  ★★ **fix149：`setCornerRadii` 有 4 个半径参数，必须全部钳**。`clamp()` 收集
+  `args[1..n]` 所有 Float 半径统一改写，否则只钳第一个会让 splash 屏第二对角短暂露方角
+  （实测 frame1 `{67.48, 11.18}`）。数组形 `setCornerRadii(sc, float[])` 因 args[1] 非 Float
+  自动跳过（安全）。学 stable 用 `radii.max()`。真机复采 frame1 即 `{67.48,67.48}`→后续
+  `{67.14,67.14}`，残留消除。
 - 兜底 `FreeformCornerKeeperHook`（system_server 抢 leash 高频写）**默认关**，需
   `touch /data/system/memoryfreeform_corner_keeper.on`；实测它只能写 1~2 帧就
   `mNativeObject ... is null`（leash 早被 release），收益不划算。自检另存
@@ -108,6 +113,10 @@
   计数要看 **LSPosed 日志** `grep "SingleHand/Corner installed"`（每 20s 刷一次）。
   ⚠ 只有**冷开**（先 `am stack remove` 掉已有 freeform task）才走入场动画，否则计数不动。
   取证：`dumpsys SurfaceFlinger | awk '/Layer \[/{n=$0} /roundedCorner/{print n" => "$0}'`。
+  ★ 感知规律：**暗色内容才看得出方角，亮色看不出**（四角与背后的对比度决定），
+    原生澎湃自己也有一瞬间直角（关 hook 最小 14.9）—— 所以只能钉住圆角，不能靠减小幅度。
+    暗色下若仍有残留 ⇒ 查**闪屏层**（SnapshotStartingWindow，46.5~48、scale 1.0，
+    走 window_animation 栈，被 isFreeformAnimStack() 跳过）。
 
 ## 近期版本（更早的看 git 历史）
 - ★1.0.141：①**悬浮球默认关**（AppState.floatBallEnabled 默认 false + prefs 默认 false，老用户已存值不受影响）。
@@ -128,6 +137,10 @@
 - ★1.0.125：BirthHook clamp 与 RecordHook doWrite 同口径（maxR=size/0.70+横屏 topSafe 地板）；
   FloatingBallService.onConfigurationChanged。fix125 曾漏提交，随 fix126 入库。
 - ★1.0.123：`SingleHandManager` **不能删**，活跃入口见 FloatingBallService/MainActivity 多处。
+
+## 工作流纪律
+- ★★★ **改完功能绝不立刻提交**：先构建 + 真机验证通过（含预期行为回归）后才可 commit/push。
+  验证未过 → 反复改到过为止，期间不要产生任何 git 提交。提交摘要仍走 `fixNN: 中文摘要`。
 
 ## 待查
 - shared_prefs 全空（设置从不落盘）疑点，未终判。

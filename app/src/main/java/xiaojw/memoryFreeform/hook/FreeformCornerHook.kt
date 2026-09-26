@@ -225,20 +225,30 @@ object FreeformCornerHook {
     private const val MAX_R = 120f
 
     private fun clamp(param: XC_MethodHook.MethodHookParam) {
-        val raw = param.args[1] as? Float ?: return
-        val sc = param.args[0] ?: return
+        val args = param.args
+        if (args.size < 2) return
+        val sc = args[0] ?: return
+        // `setCornerRadii` 可能带 4 个半径参数（四角各一），`setCornerRadius` 只有 1 个。
+        // 全部收进来统一钳，否则只钳第一个会让其余角短暂露方（实测 splash 屏第二个半径补到 67）。
+        val radii = (1 until args.size).mapNotNull { args[it] as? Float }
+        if (radii.isEmpty()) return
+        val raw = radii[0]   // 用第一个作代表判据（prev / 递增 / 学习），与旧逻辑一致
         val prev: Float?
         synchronized(lastRawLock) {
             prev = lastRaw.put(sc, raw)
         }
         val target = stable.takeIf { it > 0f } ?: defaultTarget()
+        // 把所有半径参数（不止第一个）都抬到终值
+        fun rewrite() {
+            for (k in 1 until args.size) if (args[k] is Float) args[k] = target
+        }
         when {
             // ① 入场的头几帧：半径是 0（直角矩形）—— 这正是"闪一下直角"的来源，抬上去。
             //    （退出动画收尾也会写 0，但那时 prev 一定存在且是递减，下面 ④ 放行）
             raw <= 0f -> {
                 if (prev != null) return
                 if (!isFreeformAnimStack()) return
-                param.args[1] = target
+                rewrite()
                 zeroFixed++
             }
             // ② 看起来已经到位：记下来当基准 —— ★ 但不能超过设计值。
@@ -246,10 +256,14 @@ object FreeformCornerHook {
             //    早先这里无条件 `stable = max(stable, raw)`，把过冲值当成了稳定值，
             //    结果圆角被永久钉成 70.88，比设计值大一圈（用户反馈"圆角有点奇怪"）。
             //    现在只允许学到设计值以下，过冲帧一律不认。
+            //    fix147 给了 1.02 的余量，结果过冲峰值 68.83 < 67.5×1.02=68.85 又溜了进来，
+            //    stable 被学成 68.83（比设计值大 2.5%，仍被用户看出"圆角偏大"）。
+            //    ⇒ 余量去掉，直接用设计值当上限，过冲帧一律不认。
             raw >= target * 0.95f -> {
-                val cap = defaultTarget() * 1.02f
-                if (raw in MIN_R..MAX_R && raw <= cap && raw > stable) {
-                    stable = raw
+                val cap = defaultTarget()
+                val maxR = radii.maxOrNull() ?: raw
+                if (maxR in MIN_R..MAX_R && maxR <= cap && maxR > stable) {
+                    stable = maxR
                     learned++
                 }
             }
@@ -257,7 +271,7 @@ object FreeformCornerHook {
             else -> {
                 if (prev != null && raw <= prev) return      // ④ 递减段 = 关闭/缩迷你窗，放行
                 if (!isFreeformAnimStack()) return
-                param.args[1] = target
+                rewrite()
                 clamped++
             }
         }
