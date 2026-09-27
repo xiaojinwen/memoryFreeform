@@ -1,179 +1,98 @@
-# memory-freeform 长期笔记（<3000 字符）
+# memory-freeform 长期笔记
 
-> 源码包名与 applicationId 一致：`xiaojw.memoryFreeform`（hook 子包 `xiaojw.memoryFreeform.hook`）。
-> 细则见同目录 `ARCH-DETAIL.md`（悬浮球·菜单/主线程铁律/出生钩子恢复链路/记忆链路/
-> 手势条判定链/取证速查/★清记忆断根/杂项）。**动悬浮球/出生钩子/清记忆之前先读 ARCH-DETAIL。**
-> 架构已于 fix36 整体改轨：自造窗口全部删除，现行方案只走 MIUI Freeform。
+> 包名 = applicationId = `xiaojw.memoryFreeform`（hook 子包 `xiaojw.memoryFreeform.hook`）。
+> **动悬浮球 / 出生钩子 / 清记忆之前先读同目录 `ARCH-DETAIL.md`。**
+> 架构自 fix36 起定轨：自造窗口全部删除，只走 MIUI Freeform。
 
 ## 仓库 / 构建 / 环境
-- 双远端 + 本地单一 master：`origin`=gitee(xiaojinwen/memory-freeform, 默认分支 master)、
-  `github`=github(xiaojinwen/memoryFreeform, 默认分支 main)；推送映射
-  `git config remote.github.push refs/heads/master:refs/heads/main`。
-  即 `git push origin`→gitee master，`git push github`→github main。旧 .git 备份在
-  `E:\project\single-hand-mode-git-backup-20260925`（可删）。
-  ⚠ GitHub 首次连不上 ⇒ `ssh-keyscan -H github.com >> ~/.ssh/known_hosts`。
-- 构建：`./gradlew.bat :app:assembleDebug`（JAVA_HOME=C:\Users\23123\.jdks\jbr-21.0.11、
-  ANDROID_HOME=…\Android\Sdk）→ 拷 `E:\搬家文件夹\` → 提交 `fixNN: 中文摘要` → present_files。
-  ★★ 每次 fix 必改 build.gradle.kts：versionCode=fix 序号、versionName=1.0.<fix号>。
-  APK 输出名已改为 `memory-freeform_<versionName>.apk`（debug 带 `-debug` 后缀）。
-- 签名：项目根 `keystore.properties`（已 gitignore）指向 `E:\project\apk-keys\app.jks`（alias xjwkey），
-  debug/release 统一此签名（build.gradle.kts 读 properties 建 signingConfigs）。
-  SDK 实际在 `%LOCALAPPDATA%\Android\Sdk`（build-tools 34/35，无 36；apksigner 在 35.0.0）。
-- 工具链（1.0.102 起）：Gradle 8.14.3（腾讯源）/ AGP 8.13.2 / Kotlin 2.3.20+compose 插件 /
-  compileSdk 36 / BOM 2026.03.01 / miuix 0.8.8+icons。lifecycle 2.11 别用（要 SDK37+AGP9.1）。
-  miuix 0.8 断点：TextField 收 TextFieldValue、Slider material 签名、SuperArrow 用 endActions、
-  图标 MiuixIcons.Back（icon.extended）。
+- 双远端：`origin`=gitee(memory-freeform, 默认分支 master)、`github`=github(memoryFreeform, 默认分支 main)；
+  映射 `git config remote.github.push refs/heads/master:refs/heads/main`。`git push origin`→gitee master，`git push github`→github main。
+- 构建：`./gradlew.bat :app:assembleDebug`（JAVA_HOME=C:\Users\23123\.jdks\jbr-21.0.11、ANDROID_HOME=…\Android\Sdk）
+  → 拷 `E:\搬家文件夹\` → 提交 `fixNN: 中文摘要` → present_files。
+  ★ 每次 fix 必改 `app/build.gradle.kts`：versionCode=fix 序号、versionName=1.0.<fix号>。
+  APK 名 `memory-freeform_<versionName>.apk`（debug 带 `-debug`）。
+- 签名：根 `keystore.properties` → `E:\project\apk-keys\app.jks`(alias xjwkey)，debug/release 同签名；文件已 gitignore。
+- SDK 实际在 `%LOCALAPPDATA%\Android\Sdk`（build-tools 35.0.0，无 36）。
+- 工具链：Gradle 8.14.3 / AGP 8.13.2 / Kotlin 2.3.20+compose / compileSdk 36 / compose BOM 2026.03.01 /
+  miuix 0.8.8+icons。lifecycle 2.11 别用（要 SDK37+AGP9.1）。miuix 0.8 断点：TextField 收 TextFieldValue、
+  Slider material 签名、SuperArrow 用 endActions、图标 MiuixIcons.Back(icon.extended)。
 - Gradle daemon 卡住 ⇒ `./gradlew.bat --stop`；dexBuilderDebug AccessDeniedException ⇒
-  `rm -rf app/build/intermediates/project_dex_archive`。
-- ⚠ `git rm` 会删整个工作树 → 用 `rm -f`+`git commit -a`；Edit 可能报成功未落盘 → grep 复验；
-  Bash PATH 破损 → 前导 `export PATH="/c/Windows/System32:/c/Windows:/usr/bin:/bin:$PATH"`。
-- 仓库无 native 代码；真机 Xiaomi 2304FPN6DC / Android 16 / HyperOS 3.0 / 逻辑屏 1080x2400。
-  hook 在 system_server ⇒ **装后必重启**（纯 App UI 改动 force-stop 即生效）。总闸
-  `/data/system/memoryfreeform_hook.off`。重启后先 WAKEUP+上滑解锁；测方向先锁 rotation。
-- ⚠ 绝不用 `echo >` 覆盖 `memoryfreeform_window_memory`；注入 motionevent 的 DOWN 必须 UP。
-- ⚠ RootManager.execAsync 尾部追加 `>/dev/null`，命令里自己的 `> 文件` 被顶掉 ⇒
-  **写文件必须用 `| tee 文件`**（真机验证过）。
+  删 `app/build/intermediates/project_dex_archive`。
+- ⚠ `git rm` 会删整个工作树 ⇒ 用 `rm -f` + `git commit -a`；Edit 可能报成功未落盘 ⇒ grep 复验；
+  Bash PATH 破损 ⇒ 前导 `export PATH="/c/Windows/System32:/c/Windows:/usr/bin:/bin:$PATH"`；
+  本仓库 Windows 版 find 不可用（报"找不到文件"），用 Glob 工具代替。
+- 真机 Xiaomi 2304FPN6DC / Android 16 / HyperOS 3.0 / 逻辑屏 1080x2400 / density 2.625。
+  hook 在 system_server ⇒ **装后必重启**（纯 App UI 改动 force-stop 即可）。总闸 `/data/system/memoryfreeform_hook.off`。
+  排查前先看 `/data/system/memoryfreeform_hook.active` 是否存在（不存在 = system_server 钩子没进作用域，优先怀疑 LSPosed 勾掉了"系统框架"）。
+- ⚠ 绝不用 `echo >` 覆盖 `memoryfreeform_window_memory`；注入 motionevent 的 DOWN 必须配 UP。
+- ⚠ RootManager.execAsync 尾部会追加 `>/dev/null`，命令里自己的 `> 文件` 会被顶掉 ⇒ **写文件用 `| tee 文件`**。
 - ★ 删方法铁律：先 grep 全仓确认零调用方再删；`tools/` 不参与编译。
 
 ## 核心机制（真机定论，勿推翻）
-- ★★★ `Task.getBounds()`=逻辑屏坐标；图层缩放补偿 `WindowSizing.MIUI_LAYER_SCALE`=**0.70**
-  （下发尺寸÷0.70）。fix105 曾改 1.0、fix109 已平反 —— 探针 getScale() 不可信，别再推翻。
-- ★★★ 清记忆断根三步：删记忆文件 → `am stack remove` 清残留 task → 再删文件+重启
-  （不清则钩子把坏值写回；fullscreen 残留会让 `--windowingMode 5` 复用不进 freeform）。
-- ★★★ 关小窗 ≠ remove Task；唯一存活判据 `getWindowingMode()`(5=freeform)；"用户拖 vs
-  系统重摆"只能靠来源+几何特征（全屏帧/失焦角 [35,127] 族）区分。
-- ★★★ 写入来源白名单：只 `onMovedByResize`（触摸拖）+ `Task.resize`（我们的 am resize）可信；
-  onResize/setBounds skip-write 只刷路由。resize 站点只登记活窗，**绝不能删**。
-- fix80：RESIZE 帧不改记忆 left/top（>8px 判无效只采宽高）；有触摸坐标照单全收。
-- fix91 尺寸写回四闸：非失焦角+有 lastSize 基准+差>8px+isTouched(pkg,2s)。开关默认开。
-- fix77 doWrite 三闸：①荒谬几何 ②退出动效全屏帧(w>=sw-40&&h>=sh-40)拒 ③超屏 clamp。
-- fix78i 手势条：DOWN 快照；UP 后 +900ms/+2.5s 采样判移动/关闭/重开；BAR_PENDING_TIMEOUT(6s)。
-  PointerEventListener 注册在 WMS 本体，Proxy 必须答 equals/hashCode。
-- fix89/90：退出 freeform 无条件 cancelPending；无触摸帧 IDLE_DEBOUNCE 500ms；
-  onRemove 无手势+5s 无触摸不写。fix92 出生安静期。
-- fix93 切角=`WindowMemory.mirrorAllHorizontally`（D=屏幕边÷scale），**绝不清记忆**；
-  镜像落盘回调后才准 reapplyHot。fix86 仅横屏顶部让位（topAvoidPx，App+hook 都要）。
-- 记忆按方向分键（`pkg=`/`pkg@L=`），SP 与系统文件共用 HookContract.memoryKey，不跨方向回退；
-  重开优先读钩子实时写的 WINDOW_MEMORY_PATH，读不到退 SP/设置。记忆优先于设置；
+- ★★★ `Task.getBounds()`=逻辑屏坐标；图层缩放补偿 `WindowSizing.MIUI_LAYER_SCALE`=**0.70**（下发尺寸÷0.70）。
+  fix105 曾改 1.0、fix109 已平反 —— 探针 getScale() 不可信，别再推翻。
+- ★★★ 清记忆断根三步：删记忆文件 → `am stack remove` 清残留 task → 再删文件+重启。
+  不清则钩子把坏值写回；fullscreen 残留会让 `--windowingMode 5` 复用不进 freeform。
+- ★★★ 关小窗 ≠ remove Task；唯一存活判据 `getWindowingMode()`(5=freeform)。
+- ★★★ 写入来源白名单：只 `onMovedByResize`（触摸拖）+ `Task.resize`（我们 am resize）可信。
+  onResize/setBounds 只刷路由；resize 站点只登记活窗，**不能删**。
+- fix80：RESIZE 帧不改记忆 left/top（>8px 判无效只采宽高）。fix91 尺寸写回四闸（非失焦角+有基准+差>8px+isTouched 2s）。
+  fix77 doWrite 三闸：荒谬几何 / 退出动效全屏帧拒 / 超屏 clamp。
+- fix78i 手势条：DOWN 快照；UP 后 +900ms/+2.5s 采样；BAR_PENDING_TIMEOUT 6s。Proxy 必须答 equals/hashCode。
+- fix89/90/92：退出 freeform 无条件 cancelPending；IDLE_DEBOUNCE 500ms；onRemove 无手势+5s 无触摸不写；出生安静期。
+- fix93 切角=`WindowMemory.mirrorAllHorizontally`（D=屏幕边÷scale），**绝不清记忆**；镜像落盘后才准 reapplyHot。
+  fix86 仅横屏顶部让位（topAvoidPx，App+hook 都要）。
+- 记忆按方向分键（`pkg=`/`pkg@L=`），SP 与系统文件共用 HookContract.memoryKey；记忆优先于设置；
   改尺寸类设置两份都清 = `WindowMemory.clearAll()`+`wipeSystemWindowMemory()`。
-- 图层：浮层 APPLICATION_OVERLAY(111000) 恒在小窗(21000)之上；overlay 必带 FLAG_NOT_TOUCH_MODAL；
-  无 bringToFront，z 序=add 顺序；WRAP_CONTENT 先 measure 再摆。
-- 架构：只 `am start-activity --windowingMode 5`；屏上已有小窗绝不能再 start →
-  adoptExisting（判据 `WindowWatcher.lastTasks()`）。
-- 1.0.124：默认尺寸学习链路真机通过（RecordHook 出生帧四闸 → `/data/system/memoryfreeform_default_rect`）；
-  仅自启动+无记忆才应用（self_launch 标记 15s TTL）。⚠ 横幅窗出生帧走 Task.resize 没学。
-- 1.0.122 起无「单击图标开小窗」；1.0.112 launchApp 是纯系统调用（app 零参与窗口尺寸）。
-- 1.0.128：「记住小窗大小」开关经 root 写 `/data/system/memoryfreeform_flags`(rememberSize=1/0)，
-  位置始终按记忆恢复、开关只管宽高（关=DEFAULT_RECT）。钩子改动装后重启。
-  ★ fix142 起该开关**默认关**：AppState/prefs 默认 false，且 hook 兜底（文件缺失）也由"开"翻成"关"。
-- 调试：`memoryfreeform_record.state(.moved)` 探针、jadx 反编译资产在 `.workbuddy/tmp/rom/`。
+- 图层：浮层 APPLICATION_OVERLAY(111000) 恒在小窗(21000) 之上；overlay 必带 FLAG_NOT_TOUCH_MODAL；无 bringToFront，z 序=add 顺序。
+- 架构：只 `am start-activity --windowingMode 5`；屏上已有小窗绝不能再 start → adoptExisting。
+- 1.0.124 默认尺寸学习链路真机通过（`/data/system/memoryfreeform_default_rect`）。
+  1.0.122 起无「单击图标开小窗」；1.0.112 launchApp 是纯系统调用。
+- 1.0.128「记住小窗大小」开关经 root 写 `/data/system/memoryfreeform_flags`(rememberSize)；
+  ★ 1.0.142 起**默认关**（AppState/prefs 默认 false，hook 文件缺失时兜底也翻成"关"）。
+- 1.0.130 悬浮球坐标域：overlay 布局 y 原点在状态栏下方，触摸 rawX/rawY 是绝对坐标；球径 60dp。
+- 1.0.123：`SingleHandManager` **不能删**，活跃入口在 FloatingBallService / CornerWindowService / MainActivity。
 
-## ★ 小窗圆角（fix140，勿推翻）
-- 圆角=SurfaceFlinger 图层属性 `roundedCorner`，稳定值 **67.1429 = 47/0.70**（47px=18dp）。
-- ★★ **fix144 推翻上面第一条：真因是我们自己的 BirthHook**。关掉 hook 圆角**照样**
-  补间（14.9→67），但不闪 —— 因为窗口同时在缩放，圆角同步长出来是自然变形。
-  BirthHook 让窗口"出生即最终尺寸"后，尺寸不动、只有圆角 0→67，直角才暴露。
-  所以要么把圆角钉住，要么别让尺寸一步到位。
-- 修法（fix144，`hook/FreeformCornerKeeperHook.kt`，**装 system_server**）：
-  leash 是 system_server 建的（`WindowContainer.makeAnimationLeash()` 返回
-  `SurfaceControl$Builder`，再 `.build()` 才是 leash；老 ROM 走
-  `SurfaceAnimator.createAnimationLeash`）。拿到 leash 后 **5ms 间隔写终值 67.14、
-  持续 900ms**，盖掉 SystemUI 每 16ms 的补间帧；缩放/位移/透明度不受影响。
-  ⚠ `Resources.getSystem().displayMetrics.density` 在 system_server 里是 **3.5**
-  （真机 2.625），算出来会是 90 —— 用反射 `getMiuiFreeformCornerRadius/getFreeformScale`
-  或实测值 **67.1429**。
-- ★★ **fix145 起 SystemUI 作用域可用了**（用户在 LSPosed UI 里手动勾上了，db 里可见
-  `('xiaojw.memoryFreeform','com.android.systemui',0)`，日志有
-  `corner hook installed in com.android.systemui`）。**只有"手工 INSERT db"那条路会整机
-  失效**，UI 勾选是安全的 —— fix143 那条"本机拿不到作用域"的定论作废。
-- 修法（正解，fix147）：`hook/FreeformCornerHook.kt` 装 **com.android.systemui**，两条腿：
-  ① 拦 `MultiTaskingFolmeState.addProperty` 令起点=终点（实测 `snap` 在涨，命中）；
-  ② 兜底拦 `SurfaceControl$Transaction.setCornerRadius`，只抬**递增**段 + 栈含
-  miuifreeform/multitasking；递减段（关闭/缩迷你窗）放行。
-  ★★ 兜底的自适应 `stable` 上限 = **defaultTarget()**（无余量）：fix147 用 *1.02(≈67.5)
-  仍让过冲峰值 68.83 溜进来（stable 学成 68.83，圆角偏大）；fix148 锁死设计值 67.1429。
-  folme 弹簧**过冲到 70.88**，无条件 `max()` 会把过冲值当稳定值 ⇒ 圆角被钉成 70.88；
-  同理只认 **[30,120]** 区间的值，否则全屏动画的 235 会被学走（SF 显示 335.7）。
-  ★★ **fix149：`setCornerRadii` 有 4 个半径参数，必须全部钳**。`clamp()` 收集
-  `args[1..n]` 所有 Float 半径统一改写，否则只钳第一个会让 splash 屏第二对角短暂露方角
-  （实测 frame1 `{67.48, 11.18}`）。数组形 `setCornerRadii(sc, float[])` 因 args[1] 非 Float
-  自动跳过（安全）。学 stable 用 `radii.max()`。真机复采 frame1 即 `{67.48,67.48}`→后续
-  `{67.14,67.14}`，残留消除。
-- 兜底 `FreeformCornerKeeperHook`（system_server 抢 leash 高频写）**默认关**，需
-  `touch /data/system/memoryfreeform_corner_keeper.on`；实测它只能写 1~2 帧就
-  `mNativeObject ... is null`（leash 早被 release），收益不划算。自检另存
-  `/data/system/memoryfreeform_corner_keeper.state`。
-- ★★ **LSPosed 作用域必须用 resource 数组形式才会预勾**：`xposedscope` =
-  `@array/xposed_scope`（`res/values/arrays.xml`：android + com.android.systemui）。
-  字符串 value LSPosed 不解析 = 没声明（fix140 就是这么翻车的）。
-  排查：`cat /data/adb/lspd/log/modules_*.log | grep "installed in"`。
-- 开关 `memoryfreeform_corner.off`；自检 `/data/system/memoryfreeform_corner.state`
-  （installed/clampSites/snap/fromTo/clamped/zero/learned/stable）。
-  ⚠ **SystemUI 写不进 /data/system（EACCES）**，该文件的真实内容可能是 system_server 留下的旧值；
-  计数要看 **LSPosed 日志** `grep "SingleHand/Corner installed"`（每 20s 刷一次）。
-  ⚠ 只有**冷开**（先 `am stack remove` 掉已有 freeform task）才走入场动画，否则计数不动。
-  取证：`dumpsys SurfaceFlinger | awk '/Layer \[/{n=$0} /roundedCorner/{print n" => "$0}'`。
-  ★ 感知规律：**暗色内容才看得出方角，亮色看不出**（四角与背后的对比度决定），
-    原生澎湃自己也有一瞬间直角（关 hook 最小 14.9）—— 所以只能钉住圆角，不能靠减小幅度。
-    暗色下若仍有残留 ⇒ 查**闪屏层**（SnapshotStartingWindow，46.5~48、scale 1.0，
-    走 window_animation 栈，被 isFreeformAnimStack() 跳过）。
+## ★ 小窗圆角（fix140~fix163，结论见 fix163）
+- 圆角 = SurfaceFlinger 图层属性 `roundedCorner`；小窗稳定值 **67.1429 = 47/0.70**（47px=18dp）。
+  `Miui Caption` 标题栏是 47（scale 1.0 层的真值）。补间由 SystemUI folme 每帧写 `Transaction.setCornerRadius(leash, r/scale)`。
+- ★ fix144 真因：直角是**我们自己的 BirthHook**造成的——它让窗口"出生即最终尺寸"，尺寸不动、只有圆角 0→67 才露直角；
+  不 hook 时窗口同时在缩放，圆角同步长出 = 自然变形，看不出来。
+- ★★ fix163（现行）：`hook/FreeformCornerHook`(SystemUI)、`FreeformCornerKeeperHook`(system_server)、
+  `CornerTraceHook` **全部删除**。A/B 实测"开窗收尾闪 2 帧直角"在**钩子全关时同样存在** = 原版澎湃行为，改半径值治不了。
+  作用域随之退回 `android`（HookEntry 注释已写明；`res/values/arrays.xml` 的 xposed_scope 只剩 android）。
+  ⚠ 但用户反馈当前 1.0.163 **仍然会出直角** —— 直角路径分两段：入口首帧（BirthHook 暴露）、收尾末尾 reset 帧（原版行为）。
+  **待办：重新取证定段，再决定是钉圆角还是改 BirthHook 的出生时序。**
+- 历史坑（回归时别重犯）：folme 弹簧**会过冲**（峰值 70.88 / 68.83），`stable=max()` 会把过冲值当真值 ⇒ 圆角偏大；
+  必须锁设计值 67.1429 且只认 [30,120]；`setCornerRadii` 有 **4 个半径参数必须全钳**（fix149，否则 splash 第二对角露方角）；
+  `raw<=0` 帧要全钳；`stable` 需连续 3 帧同值才转正（fix150）。
+  兜底 `FreeformCornerKeeperHook` 只能写 1~2 帧就 `mNativeObject is null`（leash 已 release），收益不划算。
+- ★ 感知规律：**暗色内容才看得出方角**（四角与背后内容对比度决定）。
+- ★ LSPosed 作用域必须用 resource 数组形式才会预勾：`@array/xposed_scope`（同类问题 fix143 翻过车）。
+  手工 INSERT db 那条路会让**整机 LSPosed 失效**（fix145 血泪）；用户自己在 UI 里勾是安全的。
+  排查：`cat /data/adb/lspd/log/modules_*.log | grep "installed in"`；模块日志每 20s 刷一次。
+- ⚠ SystemUI 写不进 `/data/system`（EACCES），自检文件常是 system_server 留下的旧值；只有**冷开**
+  （先 `am stack remove` 掉已有 freeform task）才走入场动画。
+- 取证：`adb shell dumpsys SurfaceFlinger | awk '/Layer \[/{n=$0} /roundedCorner/{print n" => "$0}'`；
+  脚本在 `tools/`（dev_corner_probe.sh 逐帧采样、dev_repro_cycle.sh 无人值守多轮复现、dev_open_video.sh 录屏打点）。
+  ⚠ 侧边栏开小窗会先走 system_server 的 `Splash Screen`/`SnapshotStartingWindow` 快照层，SystemUI 钳制覆盖不到它的 reset 帧。
 
-## 近期版本（更早的看 git 历史）
-- ★1.0.141：①**悬浮球默认关**（AppState.floatBallEnabled 默认 false + prefs 默认 false，老用户已存值不受影响）。
-  ②**「获取应用列表」权限引导**：新增 `core/AppListPermission.kt`——判定 =
-  `checkSelfPermission(QUERY_ALL_PACKAGES)` **且** 可见包数 ≥10（澎湃把该权限做成用户开关，
-  checkSelfPermission 恒 GRANTED 不可信，只能靠包数被过滤这件事反推）；MainActivity.onResume
-  refresh+shouldPrompt（**首次无条件弹一次**，点过即记 prompted，之后只在真没权限时弹）；
-  该权限无标准运行时申请框，只能送授权页：`miui.intent.action.APP_PERM_EDITOR`
-  → `com.miui.securitycenter` 的 PermissionsEditorActivity / AppPermissionsEditorActivity
-  → 系统应用详情页三级兜底。设置页新增「权限」卡片显示状态并可跳转。
-- ★★1.0.131（463cdec）：关闭小窗竞态修复（onDestroy 现查 am stack list 补收未登记 task）；
-  菜单删「切换角落」；最近任务面板高度 -50dp + 行横滑 ≥72dp 关小窗；应用面板打开即聚焦搜索框。
-- ★★1.0.130（c53a46c）：**悬浮球坐标域定论**——overlay 布局 y 原点在状态栏下方（frame=attrs+108px），
-  触摸 rawX/rawY 是绝对坐标；touchOnBall/showMenu/钳制全改绝对坐标；弹出 300ms 内 OUTSIDE 免疫。
-  球径 60dp。⚠ MenuRoot 调试日志仍保留，下版可清。
-- ★1.0.129：fix126 MenuRoot 回归——DOWN 不落球上一律 super.dispatchTouchEvent；删「隐藏悬浮球」。
-- ★1.0.126（cd552f4）：菜单三修（先取 target 再收菜单；MenuRoot 接管球区域手势；扇形半径 47dp）。
-- ★1.0.125：BirthHook clamp 与 RecordHook doWrite 同口径（maxR=size/0.70+横屏 topSafe 地板）；
-  FloatingBallService.onConfigurationChanged。fix125 曾漏提交，随 fix126 入库。
-- ★1.0.123：`SingleHandManager` **不能删**，活跃入口见 FloatingBallService/MainActivity 多处。
+## 近期版本要点（更早看 git 历史）
+- 1.0.163：删除圆角三件套（见上）；`tools/` 加三个取证脚本。
+- 1.0.142：悬浮球默认关 +「获取应用列表」权限引导（`core/AppListPermission.kt`，判定=checkSelfPermission **且** 可见包数≥10；
+  无标准运行时弹框，只能送 `miui.intent.action.APP_PERM_EDITOR` 授权页）+「记住小窗大小」默认关。
+- 1.0.141：悬浮球默认关（AppState+prefs）。
+- 1.0.131：关闭小窗竞态修复；菜单删「切换角落」；最近任务面板 -50dp、行横滑 ≥72dp 关窗。
+- 1.0.129/126：MenuRoot 手势回归（DOWN 不落球上一律 super.dispatchTouchEvent；扇形半径 47dp）。
+- 1.0.125：BirthHook clamp 与 RecordHook doWrite 同口径。
 
 ## 工作流纪律
 - ★★★ **改完功能绝不立刻提交**：先构建 + 真机验证通过（含预期行为回归）后才可 commit/push。
-  验证未过 → 反复改到过为止，期间不要产生任何 git 提交。提交摘要仍走 `fixNN: 中文摘要`。
+  验证未过 → 反复改到过为止，期间不产生任何 git 提交。
+  但**纯日志/注释类清理**不受此限（无行为变化，可随同批提交）。
+- 提交摘要走 `fixNN: 中文摘要`；release 另打 `git tag v1.0.<fix号>`（仓库此前一直只有分支、没有 tag，fix163 起补上）。
 
 ## 待查
 - shared_prefs 全空（设置从不落盘）疑点，未终判。
-
-## 圆角修复追加教训（fix151）
-- SurfaceFlinger `roundedCorner{x,y}` 采样会骗人：fix150 采样显示图层从首帧就是 67.14，
-  但用户视频里仍见方角——因为**测量的不是真正露方角的那个图层/那一帧**，或 system_server
-  钩子根本没在作用域里。
-- 排查任何 hook 行为前，先确认 `/data/system/memoryfreeform_hook.active` 是否存在；
-  没有 active 标记 = system_server 钩子未加载，**优先怀疑 LSPosed 作用域里 "系统框架" 被勾掉**。
-- 侧边栏开小窗会先走 system_server 的启动快照层（`Splash Screen`、`SnapshotStartingWindow`），
-  然后才轮到 SystemUI folme 动画；所以 system_server 侧必须有兜底（keeper/transaction clamp），
-  不能只靠 SystemUI。
-
-## ★ 上游调研定论（2026-09-27，查过 main 分支源码）
-- ★★ 2026-09-27 全生态结论：**没有任何同类开源模块处理过"小窗入场圆角补间露直角"**，
-  目前只有我们 fix144~fix149 那条 folme+transaction 双保险路线。
-  逐个查过并全量 grep（corner/folme/leash/SurfaceControl.Transaction）：
-  - `ReChronoRain/HyperCeiler` —— freeform 7 文件全是功能开关，零图层级圆角逻辑
-  - `LiuYiGL/MiFreeformEnhance`（自由小窗X 作者增强模块，2025-04）—— hook 了 SystemUI，
-    但全是隐藏 caption bar/通知白名单，**没有圆角/动画**；`SurfaceControl` 命中都在
-    `framwork-stub` 的 `setShadowSettings`（阴影，非圆角）里
-  - `XiHuYa/HyperGeoMem`（几何记忆，功能与我们高度重合）—— 只做 `setLaunchBounds` 记忆
-  - `oxohang/FanFreeform`（2026-08，最活跃）—— corner 全是侧边任务卡圆角设置 + 自绘手势预览
-  - `wumingmr/HyperOS3-freeform-unlock`、`echu2237/sidebar-hyperos` —— 仅解锁/侧边栏
-  跨仓库搜类名 `MultiTaskingFolmeState` 零命中。
-- **HyperCeiler（ReChronoRain/HyperCeiler）没有解决小窗圆角直角问题。**
-  全仓 grep `setCornerRadius|setCornerRadii|roundedCorner|SurfaceControl|Transaction|leash|folme`
-  命中全是**无关**：桌面图标/小组件圆角、最近任务卡片、输入法圆角内边距、模糊 Drawable 圆角。
-  小窗模块 `rules/systemframework/freeform/` 7 个文件全是功能开关（数量/黑白名单/贴边浮窗/
-  气泡/强制前台/跳转开小窗/通知开小窗/内容扩展/分享开小窗），无任何几何或圆角动画处理。
-  → 结论：**这块是空白地带，我们的 folme+transaction 双保险路线在同类里是独一份，别指望抄作业。**
-- HyperCeiler 的几何路线（`StickyFloatingWindows.patchActivityOptions`）与我们是同类：
-  `setLaunchWindowingMode(5)` + `options.setLaunchBounds(rect)` + `setMiuiConfigFlag(2)` +
-  injector `setFreeformScale(0.7f)`，**图层缩放同样用 0.70**（与我们 `MIUI_LAYER_SCALE` 一致）。
-  差别：它走 ActivityOptions 通道，我们 BirthHook 直接写 `LaunchParams.mBounds`（末点定音）。
+- 上游调研（HyperCeiler / MiFreeformEnhance / HyperGeoMem / FanFreeform）结论：全生态**没人处理过小窗入场圆角补间露直角**，
+  这块是空白地带，别指望抄作业； HyperCeiler 几何路线与本项目的差别只是它走 ActivityOptions 通道（详见 git 历史）。
