@@ -45,20 +45,21 @@ private const val TAG = "SingleHand/"
  *   前者是"自造 overlay 窗口盖住输入法"才有的问题，后者服务的是 App 侧自搬窗口避让；
  * - `ModuleConfig`：conf 协议解析（width/height/mode/packages）。已无 conf 文件，
  *   它的 `markActive()` 职责内联进本类（见 [markActive]）。
+ * - ★ fix163：**圆角三件套** `FreeformCornerHook`（SystemUI 侧改 folme 补间起点 +
+ *   钳 `setCornerRadius`）、`FreeformCornerKeeperHook`（system_server 抢 leash 高频写）、
+ *   `CornerTraceHook`/`CornerTrace`（取证）。A/B 实测证明"开窗收尾闪 2 帧直角"在**钩子
+ *   全关时一模一样存在** —— 那是原版澎湃自己的行为，改半径值治不了，整条线作废。
+ *   取证方法本身已收进 skill `freeform-corner-frame-forensics`，需要时重来一遍。
  *
- * 作用域：android（系统框架）+ ★fix140 起加 com.android.systemui（WMShell，只挂圆角修正）。
+ * 作用域：**只有 `android`（system_server）** —— SystemUI 里只剩那个已作废的圆角钩子，
+ * 所以它跟着从作用域里退出去（见 `@array/xposed_scope`）。
  * 模块与单手模式 App 是同一个 APK。
  */
 class HookEntry : IXposedHookLoadPackage {
 
     override fun handleLoadPackage(lpparam: XC_LoadPackage.LoadPackageParam) {
-        when (lpparam.packageName) {
-            // 系统框架（system_server）—— 出生几何 + 位置记忆
-            "android" -> installSystemServer(lpparam)
-            // ★ fix140：SystemUI（WMShell）—— 小窗入场动画的圆角补间，见 [FreeformCornerHook]
-            "com.android.systemui" -> installSystemUi(lpparam)
-            else -> return
-        }
+        // 系统框架（system_server）—— 出生几何 + 位置记忆
+        if (lpparam.packageName == "android") installSystemServer(lpparam)
     }
 
     private fun installSystemServer(lpparam: XC_LoadPackage.LoadPackageParam) {
@@ -75,43 +76,10 @@ class HookEntry : IXposedHookLoadPackage {
             // ★ fix66：把"小窗位置记录"从 App 进程搬进 system_server —— 不管谁开的窗、
             //   不管 App 在不在，拖完/缩放完/关窗时直接落盘，不必每秒轮询。
             MiuiFreeformRecordHook.install(lpparam)
-            // ★ fix144：小窗入场动画的圆角补间（0 → 67.14）在 SystemUI 里做，本机拿不到
-            //   SystemUI 作用域，改在 system_server 侧抢到 leash 后用高频写入把圆角钉死。
-            FreeformCornerKeeperHook.install(lpparam)
-            // ★ fix87：`FreeformScaleProbeHook`（fix73 的临时 scale 探针，7 个挂点、只观察不改值）
-            //   已删除 —— 缩放中和路线在 fix72 就废了，比例改由设置项 `layerScale` 直接配置，
-            //   探针留着只是给 MIUI 的 scale 读写点白挂 7 个 inline hook。
             startActiveHeartbeat()
             XposedBridge.log(TAG + "hook installed in " + lpparam.processName)
         }.onFailure {
             XposedBridge.log(TAG + "install failed")
-            XposedBridge.log(it)
-        }
-    }
-
-    /**
-     * ★ fix140：SystemUI（WMShell）里的圆角修正。
-     *
-     * 只装 [FreeformCornerHook] 一个点，且它自己全流程 `runCatching` —— SystemUI 是桌面与
-     * Shell 的宿主进程，这里出问题比 system_server 更显眼，所以：
-     *  - 总闸 [HookContract.KILL_SWITCH_PATH] 存在时不装；
-     *  - 找不到 folme 那两个类 / `FOLME_RADIUS` 字段时直接放弃（ROM 改了就不生效，不崩）。
-     *
-     * ⚠ fix140 时只声明了 `android`，结果 SystemUI 得用户手动勾作用域 —— 实测用户没勾，
-     *   钩子一行都没跑（自检文件都没生成）。fix143 起 `xposedscope` 改成
-     *   `@array/xposed_scope`（android + com.android.systemui），LSPosed 会预勾，
-     *   更新模块后只要重启即可。
-     */
-    private fun installSystemUi(lpparam: XC_LoadPackage.LoadPackageParam) {
-        runCatching {
-            if (java.io.File(HookContract.KILL_SWITCH_PATH).exists()) {
-                XposedBridge.log(TAG + "corner hook disabled by kill switch")
-                return
-            }
-            FreeformCornerHook.install(lpparam)
-            XposedBridge.log(TAG + "corner hook installed in " + lpparam.processName)
-        }.onFailure {
-            XposedBridge.log(TAG + "corner install failed")
             XposedBridge.log(it)
         }
     }

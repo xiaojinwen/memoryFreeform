@@ -15,7 +15,7 @@
         android:theme="@style/Theme.MemoryFreeform"
         android:supportsRtl="true">
 
-        <!-- LSPosed 模块声明：作用域见 @array/xposed_scope（android + com.android.systemui）。
+        <!-- LSPosed 模块声明：作用域见 @array/xposed_scope（只有 android）。
              注意必须用 resource 数组形式，LSPosed 才会预勾；纯字符串 value 它不认。 -->
         <meta-data android:name="xposedmodule" android:value="true" />
         <meta-data android:name="xposeddescription"

@@ -47,34 +47,6 @@ object HookContract {
     const val KILL_SWITCH_PATH = "/data/system/memoryfreeform_hook.off"
 
     /**
-     * ★ fix140：**圆角修复的单独开关**（SystemUI 侧读）。
-     *
-     * 总闸 [KILL_SWITCH_PATH] 会连 system_server 那两个钩子一起关掉（那些是核心功能），
-     * 而"四角不闪直角"只是观感修正，万一在某些 ROM 上 [FreeformCornerHook] 挂点命中了
-     * 不该命中的动画，得能单独摘掉它。
-     * root 建法：`touch /data/system/memoryfreeform_corner.off` + 重启 SystemUI（或重启手机）。
-     */
-    const val CORNER_OFF_PATH = "/data/system/memoryfreeform_corner.off"
-
-    /** ★ fix140：圆角钩子的自检文件（SystemUI 进程每 5 秒写一次）。 */
-    const val CORNER_STATE_PATH = "/data/system/memoryfreeform_corner.state"
-
-    /**
-     * ★ fix144：system_server 侧"抢 leash 高频写圆角"那条兜底方案的**单独开关 + 自检文件**。
-     *
-     * 它是 fix143 时期"拿不到 SystemUI 作用域"的产物：靠抢同一个 leash、每 5ms 写一次终值
-     * 去盖 SystemUI 的补间帧。实测 leash 常在动画早期就被 release（`Have you called
-     * release() already?`），只能写上 1~2 帧，效果不如 SystemUI 侧直接改动画起点。
-     *
-     * 既然现在 SystemUI 作用域可用，这条兜底**默认关**，需要时 root 建文件再重启：
-     * `touch /data/system/memoryfreeform_corner_keeper.on`
-     */
-    const val CORNER_KEEPER_ON_PATH = "/data/system/memoryfreeform_corner_keeper.on"
-
-    /** ★ fix144：兜底方案的自检文件（system_server 每 5 秒写一次，与 SystemUI 那份分开）。 */
-    const val CORNER_KEEPER_STATE_PATH = "/data/system/memoryfreeform_corner_keeper.state"
-
-    /**
      * **出生几何目标**（App 写、hook 读）。一行空格分隔：
      * `pkg=<包名> l=<左> t=<上> r=<右> b=<下> ts=<秒级时间戳> done=<0|1>`
      *
