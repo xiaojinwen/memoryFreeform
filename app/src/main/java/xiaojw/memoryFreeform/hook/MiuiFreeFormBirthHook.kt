@@ -9,6 +9,7 @@ import java.io.File
 import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import xiaojw.memoryFreeform.core.WindowSizing
 
 /**
  * ★ fix46：**出生即目标几何**（第二版 —— fix45 的单点赌签名已被真机证伪）
@@ -75,6 +76,13 @@ object MiuiFreeFormBirthHook {
     private const val READ_INTERVAL_MS = 300L
 
     private const val FREEFORM_MODE = 5
+
+    /**
+     * ★ fix164：下发包络的换算系数（与 [WindowSizing.MIUI_LAYER_SCALE] 同值，这里
+     *   不引入依赖是为了让收边逻辑能在 system_server 里独立跑）。目标矩形按它膨胀成
+     *   包络：`maxR = 屏宽 / 0.70`、`maxB = 屏高 / 0.70`（图层缩放锚点左上，见 [fit]）。
+     */
+    private const val LAYER_SCALE = 0.70f
 
     // ---------------------------------------------------------------- 挂点定义
 
@@ -461,6 +469,9 @@ object MiuiFreeFormBirthHook {
      */
     private fun targetFor(pkg: String, args: Array<Any?>): Target? {
         val now = System.currentTimeMillis()
+        // ★ fix164：屏幕尺寸在**最前面**取一次（[displaySize] 有 2s 缓存，三个来源共用
+        //   同一份），免得 birth_target 那一路为了收边再读一遍。
+        val size = displaySize(args)
 
         val raw = if (now - cachedAt > READ_INTERVAL_MS) {
             cachedAt = now
@@ -473,7 +484,12 @@ object MiuiFreeFormBirthHook {
                 val i = tok.indexOf('=')
                 if (i > 0) map[tok.substring(0, i)] = tok.substring(i + 1)
             }
-            if (map["pkg"] == pkg) parse(map, now, TargetSource.BIRTH_TARGET)?.let { return it }
+            if (map["pkg"] == pkg) {
+                parse(map, now, TargetSource.BIRTH_TARGET)?.let { t ->
+                    // ★ fix164：连这里也要收 —— 文件是外部写入的，旧版本可能留着超屏矩形。
+                    return fit(t, size)
+                }
+            }
         }
 
         val mraw = if (now - memCachedAt > MEM_READ_INTERVAL_MS) {
@@ -482,8 +498,8 @@ object MiuiFreeFormBirthHook {
                 .getOrDefault("").also { memCachedRaw = it }
         } else memCachedRaw
 
-        val size = displaySize(args)
-        val landscape = size != null && size[0] > size[1]
+        // ★ fix164b：旋转判断也用兜底屏，size 为空时不再默认竖屏（会取错方向记忆）。
+        val landscape = (size ?: systemScreenSize())?.let { it[0] > it[1] } ?: false
 
         // ★ fix124：学得的「系统默认几何」（RecordHook 从系统入口出生帧学得，按方向一行）。
         //   fix128 把读取提到记忆分支前 —— 开关关掉时记忆命中要用它的**宽高**（只恢复位置）。
@@ -520,13 +536,17 @@ object MiuiFreeFormBirthHook {
                     w = drect[2] - drect[0]
                     h = drect[3] - drect[1]
                 }
-                val maxR = (size[0] / 0.70f).toInt()
-                val maxB = (size[1] / 0.70f).toInt()
-                val topSafe = if (size[0] > size[1]) statusBarHeightSystem() else 0
-                val l = rect[0].coerceIn(0, (maxR - w).coerceAtLeast(0))
-                val t = rect[1].coerceIn(topSafe, (maxB - h).coerceAtLeast(topSafe))
-                memSkip = if (w == rect[2] - rect[0]) "$key:ok" else "$key:ok(default-size)"
-                return Target(pkg, l, t, l + w, t + h, now / 1000, TargetSource.MEMORY)
+                // ★ fix164：**尺寸与位置一起收**（[fit]，内部走 WindowSizing.fitBounds 同口径）。
+                //   以前这里只收位置 —— 一旦记忆宽/高超包络，`coerceIn(0, maxR - w)` 退化成
+                //   left=0 而宽高原样下发，小窗右/下就直接出屏（用户报的"超出屏幕边界"）。
+                memSkip = "$key:ok" +
+                    if (drect != null && (w != drect[2] - drect[0] || h != drect[3] - drect[1])) {
+                        "(default-size)"
+                    } else ""
+                return fit(
+                    Target(pkg, rect[0], rect[1], rect[0] + w, rect[1] + h, now / 1000, TargetSource.MEMORY),
+                    size
+                )
             } else if (rect != null) {
                 memSkip = "$key:not-fit(${size?.get(0) ?: 0}x${size?.get(1) ?: 0})"
             }
@@ -550,18 +570,71 @@ object MiuiFreeFormBirthHook {
             //   （竖屏默认 left=162 会被 1080-1080=0 压成 x=0 —— 用户报"坐标不对"）。
             val w = drect[2] - drect[0]
             val h = drect[3] - drect[1]
-            val maxR = (size[0] / 0.70f).toInt()
-            val maxB = (size[1] / 0.70f).toInt()
-            val topSafe = if (size[0] > size[1]) statusBarHeightSystem() else 0
-            val l = drect[0].coerceIn(0, (maxR - w).coerceAtLeast(0))
-            val t = drect[1].coerceIn(topSafe, (maxB - h).coerceAtLeast(topSafe))
             memSkip = "default:ok"
-            return Target(pkg, l, t, l + w, t + h, now / 1000, TargetSource.DEFAULT)
+            return fit(
+                Target(pkg, drect[0], drect[1], drect[0] + w, drect[1] + h, now / 1000, TargetSource.DEFAULT),
+                size
+            )
         } else if (drect != null) {
             memSkip = if (!HookContract.selfLaunchFresh(pkg)) "default:not-self-launch" else "default:not-fit"
         }
         return null
     }
+
+    /**
+     * ★ fix164：**把出生目标收进屏幕包络**（尺寸 + 位置一起收，超出自动修正）。
+     *
+     * 目标有三个来源（[TargetSource]），以前各自写了一套收边，而且**记忆那一路只收位置、
+     * 不收尺寸** —— `l = rect[0].coerceIn(0, maxR - w)` 在 `w > maxR` 时会退化成 `l = 0`，
+     * 而超屏的宽高**原样下发**，小窗右/下就直接挂在屏幕外（用户报的"打开记忆小窗超出屏幕
+     * 边界"）。现在三条路统一走这里，钳制逻辑复用 App 侧 [WindowSizing.fitBounds] 的
+     * 同款算法（包络 = 屏幕边 ÷ 图层缩放，横屏让出状态栏当 top 地板）。
+     *
+     * ⚠ 只有**收不动**（拿不到屏幕尺寸）时才原样返回 —— 那比"少收一次"少见，
+     *   而丢掉摆位会让窗口落回系统默认，更容易被当成 bug。
+     */
+    private fun fit(t: Target, size: IntArray?): Target {
+        // ★ fix164b：**绝不因读不到屏就放弃钳制**。system_server 出生回调里 `displaySize(args)`
+        //   反射拿 Task 的 DisplayInfo 可能为空（且失败会被缓存 2s），旧版 `if (size == null) return t`
+        //   会让"超出屏幕边界"整段漏掉 —— 这正是 fix164"越界没修好"的真凶。
+        //   兜底用 [systemScreenSize]（Resources.getSystem() 在 system_server 稳定可用，
+        //   给的就是真实分辨率），保证包络永远有值、钳制永远生效。
+        val s = size ?: systemScreenSize()
+        if (s == null) {
+            memSkip = "钳制跳过(连系统兜底都拿不到屏)"
+            log("目标未钳制 $lastPkg（屏幕尺寸全读不到，放弃收边）: [${t.l},${t.t}][${t.r},${t.b}]")
+            return t
+        }
+        val maxW = (s[0] / LAYER_SCALE).toInt().coerceAtLeast(WindowSizing.MIN_SIDE)
+        val maxH = (s[1] / LAYER_SCALE).toInt().coerceAtLeast(WindowSizing.MIN_SIDE)
+        val topSafe = if (s[0] > s[1]) statusBarHeightSystem() else 0
+        // ★ fix166b：底部预留手势条安全区（GESTURE_BOTTOM_GAP），不让小窗底边吃掉
+        //   全面屏手势条（上滑回桌面 / 多任务）。
+        val r = WindowSizing.clampRect(
+            intArrayOf(t.l, t.t, t.r, t.b), s[0], s[1], topSafe, LAYER_SCALE,
+            bottomSafe = WindowSizing.GESTURE_BOTTOM_GAP
+        ) ?: return t
+        if (r[0] != t.l || r[1] != t.t || r[2] != t.r || r[3] != t.b) {
+            memSkip = "越界修正(${t.l},${t.t},${t.r},${t.b}->${r[0]},${r[1]},${r[2]},${r[3]})"
+            log("目标越出屏幕包络(${maxW}x$maxH)，自动修正 $lastPkg: " +
+                "[${t.l},${t.t}][${t.r},${t.b}] -> [${r[0]},${r[1]}][${r[2]},${r[3]}]")
+        }
+        return Target(t.pkg, r[0], r[1], r[2], r[3], t.ts, t.source)
+    }
+
+    /**
+     * ★ fix164b：system_server 内的**可靠**屏幕尺寸兜底。
+     *
+     * [displaySize]（`Task.getDisplayContent()→DisplayInfo.appWidth`）在出生回调里反射不到
+     * Task 时返回 null；这里改用 `Resources.getSystem()` —— 它在 system_server 稳定可用，
+     * 给的就是当前真实分辨率（跟随旋转），不依赖任何反射。
+     */
+    private fun systemScreenSize(): IntArray? = runCatching {
+        val dm = android.content.res.Resources.getSystem().displayMetrics
+        val w = dm.widthPixels
+        val h = dm.heightPixels
+        if (w > 0 && h > 0) intArrayOf(w, h) else null
+    }.getOrNull()
 
     /** ★ fix124b：系统状态栏高度（px），与 RecordHook 同款（横屏 topSafe 地板用）。 */
     private fun statusBarHeightSystem(): Int = runCatching {

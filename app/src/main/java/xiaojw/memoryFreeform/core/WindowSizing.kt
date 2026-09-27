@@ -53,6 +53,16 @@ object WindowSizing {
     const val MIN_SIDE = 160
 
     /**
+     * ★ fix166b：全面屏手势 / 导航栏区域的**最小**安全距离（px，逻辑像素）。
+     *
+     * 竖屏默认 `bottomGapPx=0`（贴到屏幕最底），但在手势导航下屏幕最底有一条**透明手势条**
+     * （上滑回桌面 / 多任务），小窗贴到底会把这条手势吃掉，用户从底部上滑失效。
+     * 这里给一个保守下限，让小窗底边上抬，露出手势区。三键导航下由 [gestureSafeBottomPx]
+     * 读到的真实导航栏高度覆盖（更高）。
+     */
+    const val GESTURE_BOTTOM_GAP = 40
+
+    /**
      * ★ fix42：澎湃（HyperOS 3）给 Freeform 窗口的**图层缩放**。实测恒为 0.70。
      *
      * 这是从 SurfaceFlinger 抓到的硬数据，不是估算：
@@ -177,6 +187,76 @@ object WindowSizing {
     fun isLandscape(ctx: Context): Boolean = realScreenSize(ctx).let { it.first > it.second }
 
     /**
+     * ★ fix166：**小窗几何的边界钳制唯一入口** —— 在**视觉域**收尺寸与位置，超出即自动修正。
+     *
+     * ## 坐标系（必须先看清，否则钳制会算错 —— 这是 fix164/165 反复翻车的根因）
+     *
+     * 记忆 / 系统存的是**下发域**坐标，`0.70` 图层缩放**只作用在宽高上、锚点(左上)不缩放**：
+     *   - 视觉 left/top = 下发 left/top（不动）；
+     *   - 视觉 right  = 下发 left + (下发 right − 下发 left) × 0.70；
+     *   - 视觉 bottom = 下发 top  + (下发 bottom − 下发 top)  × 0.70。
+     * 所以**不能用"下发域包络 = 物理屏 ÷ 0.70"去钳位置** —— 那等于把下发宽当视觉宽在减，
+     * 会让视觉右/底照样越界（fix164 的真实 bug）。正确做法是：先把下发值按上式还原成视觉值，
+     * 在视觉域钳进真实屏，再反推回下发值。
+     *
+     * ## 钳制口径
+     *
+     *  ① **尺寸**：下发宽高收进 `[minSide, 屏/scale]` —— 保证视觉宽高 ≤ 真实屏。
+     *  ② **位置**：用「视觉约束 ÷ scale」反推下发上限 ——
+     *     下发 left ≤ 屏宽 − 视觉宽、下发 top ≤ 屏高 − 视觉高（再抬到 topSafe 地板）。
+     *     收完之后**视觉**整块必然落在真实屏内。
+     *
+     * @param rect 目标矩形 `[left, top, right, bottom]`（下发域，可以超物理屏）
+     * @param screenW 视觉可用宽（真实像素，如 1080；**不是** ÷scale 的包络）
+     * @param screenH 视觉可用高（真实像素，已是扣导航栏的可用区；topSafe / bottomSafe 只作上下限，不再扣高度）
+     * @param topSafe 允许的最小 `top`（横屏状态栏高度，fix86）
+     * @param bottomSafe 允许的最大 `bottom` 上方距离（竖屏底部留安全距离防全面屏手势条，fix166b）；
+     *   传 [GESTURE_BOTTOM_GAP] 即"至少露出手势区"，传用户「离底边间距」则两取大
+     * @param minSide 最小边长（低于这个就不是能用的小窗）
+     * @param scale 图层缩放（默认 [MIUI_LAYER_SCALE]；本就是视觉↔下发的换算系数）
+     */
+    fun fitBounds(
+        rect: IntArray,
+        screenW: Int,
+        screenH: Int,
+        topSafe: Int = 0,
+        bottomSafe: Int = 0,
+        minSide: Int = MIN_SIDE,
+        scale: Float = MIUI_LAYER_SCALE
+    ): IntArray {
+        val s = if (scale > 0.01f) scale else MIUI_LAYER_SCALE
+        val sw = screenW.coerceAtLeast(1)
+        // screenH 已是扣掉导航栏的**可用高**；topSafe / bottomSafe 只作上下限（横屏让出状态栏 /
+        // 底部留手势条安全区），不要再拿它们减一遍高度，否则竖屏也会被多扣一条。
+        val sh = screenH.coerceAtLeast(1)
+        val top = topSafe.coerceAtLeast(0)
+        val bottom = bottomSafe.coerceAtLeast(0)
+        // 下发域尺寸上限：视觉宽高 = 下发宽高 × s ≤ 真实屏可用区。高度上限**再扣掉
+        // topSafe + bottom**（fix166b：底部手势条安全区），保证「视觉 top ≥ top」与
+        // 「视觉 bottom ≤ sh − bottom」不冲突（否则高窗会把 top 顶成负数、或底边吃掉手势条）。
+        val mwD = (sw / s).toInt().coerceAtLeast(1)
+        val mhD = ((sh - top - bottom) / s).toInt().coerceAtLeast(1)
+        val loW = minSide.coerceAtMost(mwD)
+        val loH = minSide.coerceAtMost(mhD)
+        val w = (rect[2] - rect[0]).coerceIn(loW, mwD)
+        val h = (rect[3] - rect[1]).coerceIn(loH, mhD)
+        // ★★★ 关键修正（fix166）：0.70 只作用在宽高上、锚点(左上)不动，**位置上限必须用
+        //   视觉约束 ÷ s 反推成浮点再 floor**，不能像旧版那样 `maxW - 下发宽`（把下发宽当
+        //   视觉宽减）、也不能把视觉宽高 int 截断后再算上限（会差出 ~0.6px 的残越界）。
+        //   视觉 right = left + 下发宽×s ≤ sw  ⇒  left ≤ sw − 下发宽×s
+        //   视觉 bottom = top + 下发高×s ≤ sh − bottom  ⇒  top ≤ sh − bottom − 下发高×s
+        val vWf = w * s
+        val vHf = h * s
+        val maxLeft = (sw - vWf).coerceAtLeast(0f)
+        // ★ fix166b：底部绝不吃掉全面屏手势条 —— 视觉底 ≤ sh − bottom。
+        val maxTop = (sh - bottom - vHf).coerceAtLeast(top.toFloat())
+        // 下发坐标是整数像素，用 floor（正数 toInt 即截断）保证视觉右/底不越过 sw / (sh−bottom)。
+        val l = rect[0].coerceIn(0, maxLeft.toInt())
+        val t = rect[1].coerceIn(top, maxTop.toInt())
+        return intArrayOf(l, t, l + w, t + h)
+    }
+
+    /**
      * ★ fix64：**把矩形收进屏幕**（收尺寸 → 再收位置，保证整块都在屏内）。
      *
      * 为什么必须有：位置记忆是**按方向分开存**的，但记忆可能来自
@@ -190,24 +270,23 @@ object WindowSizing {
      *   （横屏时"设置高度被收边到满屏高"落下的脏值）会让窗顶压在状态栏上，这里把它抬到
      *   状态栏下沿；同时高度上限也跟着减掉 `minTop`，保证抬完之后底边不越界。
      *
-     * @return 收好的矩形；尺寸退化到不可用时返回 null（调用方应退回设置值）
+     * ★ fix164：本函数只是 [fitBounds] 带 null 签名的一层外壳（调用方习惯"退化返回 null
+     *   = 退回系统默认"），钳制逻辑只有 [fitBounds] 一份，两边不会算出不同结果。
+     *
+     * @return 收好的矩形；矩形不合法时返回 null（调用方应退回设置值 / 系统默认）
      */
     fun clampRect(
         rect: IntArray,
         screenW: Int,
         screenH: Int,
-        minTop: Int = 0
+        minTop: Int = 0,
+        scale: Float = MIUI_LAYER_SCALE,
+        bottomSafe: Int = 0
     ): IntArray? {
         if (rect.size != 4) return null
-        val top = minTop.coerceIn(0, (screenH - MIN_SIDE).coerceAtLeast(0))
-        val maxW = screenW.coerceAtLeast(MIN_SIDE)
-        val maxH = (screenH - top).coerceAtLeast(MIN_SIDE)
-        val w = (rect[2] - rect[0]).coerceIn(MIN_SIDE.coerceAtMost(maxW), maxW)
-        val h = (rect[3] - rect[1]).coerceIn(MIN_SIDE.coerceAtMost(maxH), maxH)
-        if (w <= 0 || h <= 0) return null
-        val l = rect[0].coerceIn(0, (screenW - w).coerceAtLeast(0))
-        val t = rect[1].coerceIn(top, (screenH - h).coerceAtLeast(top))
-        return intArrayOf(l, t, l + w, t + h)
+        val r = fitBounds(rect, screenW, screenH, minTop, bottomSafe, MIN_SIDE, scale)
+        if (r[2] <= r[0] || r[3] <= r[1]) return null
+        return r
     }
 
     /** 这个矩形是不是**完整落在**屏幕内（按当前方向判）。 */

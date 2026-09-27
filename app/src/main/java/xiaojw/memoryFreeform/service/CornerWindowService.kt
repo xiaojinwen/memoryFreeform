@@ -555,7 +555,8 @@ class CornerWindowService : Service() {
         val (sw, sh) = realScreenSize()
         // ★ fix86：顶部让出状态栏（横屏），否则窗顶贴到 y=0、移动手势条压在状态栏上。
         val topAvoid = topAvoidPx()
-        val usableH = (sh - navAvoidPx() - topAvoid).coerceAtLeast(dp(160))
+        // ★ fix166b：底边让出安全区（手势条），不再只用用户间距。
+        val usableH = (sh - bottomGap() - topAvoid).coerceAtLeast(dp(160))
         val isLeft = StateManager.current.corner == Corner.LEFT
         val wx = if (isLeft) 0 else (sw - ww).coerceAtLeast(0)
         val wy = topAvoid + (usableH - wh).coerceAtLeast(0)
@@ -675,8 +676,8 @@ class CornerWindowService : Service() {
         //   "完全没按设置里的角落 / 离底边间距摆"。
         val rect = settingsRect()
         val (sw, sh) = realScreenSize()
-        // 底边：屏幕底往上让出「离底边间距」——这正是设置项该起的作用
-        val bottom = (sh - navAvoidPx()).coerceAtLeast(dp(200))
+        // 底边：屏幕底往上让出「离底边间距」（★ fix166b：至少露出手势条安全区）
+        val bottom = (sh - bottomGap()).coerceAtLeast(dp(200))
         val w = (rect[2] - rect[0]).coerceIn(dp(240).coerceAtMost(sw), sw)
         // ★ fix132：单手操作 —— 列表顶太高拇指够不着（1080×2400 上旧逻辑列表顶到屏幕上
         //   半部）。两种面板统一按屏幕可用高度的 50% 封顶，列表本身可滚动，矮一点反而更
@@ -1309,6 +1310,16 @@ class CornerWindowService : Service() {
     private fun navAvoidPx(): Int = StateManager.current.bottomGapPx.coerceAtLeast(0)
 
     /**
+     * ★ fix166b：小窗底边的**安全**离屏距离（px）。
+     *
+     * 用户的「离底边间距」[navAvoidPx] 默认是 0（贴到屏幕最底），但在全面屏手势导航下
+     * 屏幕最底有一条**透明手势条**（上滑回桌面 / 多任务）—— 小窗贴到底会把这条手势吃掉，
+     * 用户从底部上滑失效。所以这里取 `max(用户间距, [WindowSizing.GESTURE_BOTTOM_GAP])`
+     * 给一个保守下限，让小窗底边上抬、露出手势区。用户手动设了更大的间距时以他的为准。
+     */
+    private fun bottomGap(): Int = navAvoidPx().coerceAtLeast(WindowSizing.GESTURE_BOTTOM_GAP)
+
+    /**
      * 屏幕**真实**分辨率（含状态栏/导航栏区域）。
      *
      * 不能用 `resources.displayMetrics` —— 本机实测它给 1080x**2292**，比真实
@@ -1478,7 +1489,10 @@ class CornerWindowService : Service() {
         val (screenW, screenH) = realScreenSize()
         val topAvoid = topAvoidPx()
         val usableTop = topAvoid
-        val usableH = (screenH - navAvoidPx() - topAvoid).coerceAtLeast(WindowSizing.MIN_SIDE)
+        // ★ fix166b：底边让出手势条安全区。这里**不直接扣高度**，而是把「真实屏 + 顶部让位
+        //   + 底部安全」三个量一起交给 clampRect（与系统侧 Birth/Record 钩子同一口径），
+        //   否则竖屏/横屏会各算一套、还容易在横屏把 topAvoid 二次扣一遍导致窗变矮。
+        val usableH = (screenH - bottomGap() - topAvoid).coerceAtLeast(WindowSizing.MIN_SIDE)
         // ★ fix64：屏幕宽 > 高 = 横屏（realScreenSize 跟随旋转）。记忆按方向分开存，
         //   读的时候**必须**带上方向，否则会拿竖屏的矩形去横屏用。
         val landscape = screenW > screenH
@@ -1511,23 +1525,29 @@ class CornerWindowService : Service() {
         }
         // ★ fix86：minTop = 顶部让出的高度（横屏=状态栏）。下发坐标与视觉坐标在
         //   top 上是同一个值（0.70 只缩右/下、锚点左上），所以这里直接用逻辑像素。
-        val fitted = WindowSizing.clampRect(
-            intArrayOf(mem[0], mem[1], mem[0] + w, mem[1] + h),
-            limW, limH + usableTop, usableTop
-        )
+        // ★ fix164：包络 = `limW x limH`（顶部让位走 [WindowSizing.fitBounds] 的 topSafe，
+        //   不再把 usableTop 叠进高度上限里 —— 叠了会让窗长高一条状态栏、底边压到导航栏下）。
+        val raw = intArrayOf(mem[0], mem[1], mem[0] + w, mem[1] + h)
+        // ★ fix166：包络改用真实屏尺寸 + scale（不再传"已÷scale"的 limW/limH，否则位置上限算错）。
+        // ★ fix166b：包络 = 真实屏 + scale + 顶部让位 + 底部手势安全区（bottomSafe 同一口径）。
+        val fitted = WindowSizing.clampRect(raw, screenW, screenH, usableTop, scale, bottomSafe = bottomGap())
         if (fitted == null) {
             SHLog.w(TAG, "windowMemory: $pkg 的记忆没法收进当前屏幕，交系统默认")
             return null
         }
+        // ★ fix164：记忆越界（尺寸超限或位置压到屏外/状态栏下）时把修正结果单独打出来 ——
+        //   "小窗超出屏幕边界"这种反馈光看最终值看不出是记忆脏了还是系统改的。
+        val corrected = !raw.contentEquals(fitted)
         SHLog.i(
             TAG,
             "windowMemory: 命中 $pkg（${if (landscape) "横屏" else "竖屏"}，" +
                 (if (sizeFromDefault) "位置=记忆 大小=系统默认" else "位置和大小都用记忆") +
                 ") 记忆=${mem[0]},${mem[1]},${mem[2]},${mem[3]}" +
-                " -> 下发 ${fitted[2] - fitted[0]}x${fitted[3] - fitted[1]} @ [${fitted[0]},${fitted[1]}]" +
-                "（已按 ${limW}x$limH 收边，" +
-                "屏幕 ${screenW}x$usableH ÷ 图层缩放 ${"%.3f".format(scale)}，" +
-                "★fix86 顶部让出=$usableTop）"
+                (if (corrected) " ⚠越界已自动修正 -> " else " -> ") +
+                "${fitted[2] - fitted[0]}x${fitted[3] - fitted[1]} @ [${fitted[0]},${fitted[1]}]" +
+                "（包络 ${limW}x$limH，" +
+                "屏幕 ${screenW}x$screenH ÷ 图层缩放 ${"%.3f".format(scale)}，" +
+                "★fix86 顶部让出=$usableTop，底部手势安全=${bottomGap()}）"
         )
         return fitted
     }
@@ -1679,6 +1699,38 @@ class CornerWindowService : Service() {
         //     2) 万一澎湃的手势层在窗口被触摸/贴边后自己挪了一次，就地压回去一遍。
         Thread.sleep(600)
         val actual = readTaskBounds(taskId)
+
+        // ★ fix164：**开完之后再兜一道** —— 复核时读回的几何如果还越出屏幕包络，
+        //   就地按 [WindowSizing.fitBounds] 修正并重压一次。
+        //   为什么不能只靠下发前的钳制：出生钩子（system_server）走的是它自己那套包络
+        //   计算，澎湃也可能在我们下发之后把窗口重摆/放大（失焦重摆、手势层贴边回弹），
+        //   到这一刻才能拿到"系统最终 accepted 的几何"—— 那才是用户眼睛看到的东西。
+        val actualRect = parseBounds(actual)
+        if (actualRect != null) {
+            val (sw, sh) = realScreenSize()
+            val topAvoid = topAvoidPx()
+            val scale = HookBridge.miuiLayerScale()
+            val limW = ((sw / scale).toInt()).coerceAtLeast(WindowSizing.MIN_SIDE)
+            val limH = (
+                (sh - bottomGap() - topAvoid) / scale
+            ).toInt().coerceAtLeast(WindowSizing.MIN_SIDE)
+            // ★ fix166：钳制传真实屏 + scale（limW/limH 仅用于日志展示下发域包络）。
+            // ★ fix166b：底边让出手势条安全区（bottomSafe 与系统钩子同一口径）。
+            val fit = WindowSizing.clampRect(actualRect, sw, sh, topAvoid, scale, bottomSafe = bottomGap())
+            if (fit != null && !fit.contentEquals(actualRect)) {
+                SHLog.w(
+                    TAG,
+                    "resizeTask: 复核发现小窗越出屏幕边界 $actual（包络 ${limW}x$limH），" +
+                        "自动修正为 [${fit[0]},${fit[1]}][${fit[2]},${fit[3]}] 并重压"
+                )
+                runCatching {
+                    rm.executeFast("am task resize $taskId ${fit[0]} ${fit[1]} ${fit[2]} ${fit[3]}", 3000)
+                }
+                Thread.sleep(400)
+                SHLog.i(TAG, "resizeTask: 修正后实际=${readTaskBounds(taskId) ?: "读取失败"}")
+            }
+        }
+
         when {
             actual == null ->
                 SHLog.w(TAG, "resizeTask: 复核读不到 taskId=$taskId 的几何（任务已消失？）")
@@ -1845,6 +1897,19 @@ class CornerWindowService : Service() {
         }.getOrNull() ?: return null
         val re = Regex("RootTask id=$taskId bounds=(\\[[0-9,-]+]\\[[0-9,-]+])")
         return re.find(out)?.groupValues?.get(1)
+    }
+
+    /**
+     * ★ fix164：把 `[245,1189][1080,2358]` 解析成 `[l,t,r,b]`；解析失败返回 null。
+     *
+     * 复核那一步要用实测几何做边界判定，而 `readTaskBounds` 给的是字符串，
+     * 这里顺手把"取子串 + 去括号 + 逗号切分"收在一处。
+     */
+    private fun parseBounds(s: String?): IntArray? {
+        if (s.isNullOrBlank()) return null
+        val v = Regex("-?\\d+").findAll(s).map { it.value.toInt() }.toList()
+        if (v.size != 4 || v[2] <= v[0] || v[3] <= v[1]) return null
+        return intArrayOf(v[0], v[1], v[2], v[3])
     }
 
     // ------------------------------------------------------------------ 收尾

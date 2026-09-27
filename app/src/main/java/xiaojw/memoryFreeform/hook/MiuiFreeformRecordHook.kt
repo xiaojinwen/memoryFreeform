@@ -13,6 +13,7 @@ import java.lang.reflect.Proxy
 import kotlin.math.abs
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import xiaojw.memoryFreeform.core.WindowSizing
 
 /**
  * ★ fix66：**小窗位置记录搬进 system_server**（之前在 App 进程的 `WindowWatcher` 里轮询）。
@@ -83,6 +84,13 @@ object MiuiFreeformRecordHook {
 
     /** 记下来的窗口最小边（比这小的不是"用户在用的小窗"）。 */
     private const val MIN_SIDE = 200
+
+    /**
+     * ★ fix164：下发包络换算系数（= [WindowSizing.MIUI_LAYER_SCALE]）。记忆存的是**下发值**，
+     *   "装得下"判的是下发包络 `屏边 ÷ 0.70`（图层缩放锚点左上，见 WindowSizing 的类注释），
+     *   与出生钩子 [MiuiFreeFormBirthHook] 同口径。
+     */
+    private const val LAYER_SCALE = 0.70f
 
     // ★★ fix78：手势条（小窗底部那条）拖拽关窗的「触摸起点锁定」参数。
     //  ★ fix78f：条带几何判定已整体移除（pointer 坐标空间 ≠ bounds 空间，实测不可靠），
@@ -1114,8 +1122,15 @@ object MiuiFreeformRecordHook {
         val h = rect.bottom - rect.top
         if (w < MIN_SIDE || h < MIN_SIDE) return
         val size = readDisplaySize()
-        // 落盘前**收边到屏幕内容坐标系内的最大/最小位置**（保持宽高，只平移位置），
-        // 拿不到屏幕就原样写（总比不记好）。
+        // ★ fix164：包络（下发域的"屏幕边界"）先算出来 —— 下面收边与 RESIZE 复算都要用，
+        //   拿不到屏幕时置 0，走"原样写"的降级分支（总比不记好）。
+        // ★ fix166：这里传的是**真实屏宽高**（不再 ÷scale）；÷scale 的换算交给
+        //   [WindowSizing.clampRect] 内部做视觉域钳制，否则位置上限算错会让视觉越界。
+        val maxRight = size?.get(0) ?: 0
+        val maxBottom = size?.get(1) ?: 0
+        val topSafe = if (size != null && size[0] > size[1]) statusBarHeightSystem() else 0
+        // ★ fix164：收边逻辑统一走 [WindowSizing.fitBounds]（与出生钩子同口径）：
+        //   **尺寸 + 位置一起收**，而不是只平移位置。
         val out: Rect
         if (size != null) {
             val (sw, sh) = size
@@ -1157,14 +1172,11 @@ object MiuiFreeformRecordHook {
             //   停在状态栏下沿，App 侧重开时（WindowSizing.clampRect(minTop)）才不会再
             //   出现"一开出来手势条就在状态栏上"。竖屏不动（屏高富余，且改了会影响
             //   习惯了顶天立地大窗的摆法）。
-            val topSafe = if (sw > sh) statusBarHeightSystem() else 0
-            val maxRight = (sw / 0.70f).toInt()
-            val maxBottom = (sh / 0.70f).toInt()
-            val cw = w.coerceAtMost(maxRight)
-            val ch = h.coerceAtMost(maxBottom)
-            val l = rect.left.coerceIn(0, (maxRight - cw).coerceAtLeast(0))
-            val t = rect.top.coerceIn(topSafe, (maxBottom - ch).coerceAtLeast(topSafe))
-            out = Rect(l, t, l + cw, t + ch)
+            val fitted = WindowSizing.clampRect(
+                intArrayOf(rect.left, rect.top, rect.right, rect.bottom), maxRight, maxBottom, topSafe, LAYER_SCALE,
+                bottomSafe = WindowSizing.GESTURE_BOTTOM_GAP
+            )
+            out = if (fitted != null) Rect(fitted[0], fitted[1], fitted[2], fitted[3]) else rect
             lastSkip = if (out != rect)
                 "$pkg:clamp(${rect.left},${rect.top},${rect.right},${rect.bottom}->${out.left},${out.top},${out.right},${out.bottom})"
             else "-"
@@ -1196,8 +1208,25 @@ object MiuiFreeformRecordHook {
                     abs(out.top - old.top) > RESIZE_COORD_TOL)
             ) {
                 out2 = Rect(old.left, old.top, old.left + out.width(), old.top + out.height())
+                // ★ fix164：沿用旧坐标会**重算右/底边**（`old.left + 新宽`），这一步原来没有
+                //   再收边 —— 旧坐标靠右 + 新尺寸变大时，`right` 直接冲出包络，越界值被写进
+                //   记忆，下次开窗就是"小窗超出屏幕边界"。收完再落盘。
                 resizeCoordInvalid.incrementAndGet()
-                lastSkip = "$pkg:resize-coord-invalid(帧${out.left},${out.top}→沿用${old.left},${old.top})"
+                var reclampNote = ""
+                if (size != null) {
+                    val f2 = WindowSizing.clampRect(
+                        intArrayOf(out2.left, out2.top, out2.right, out2.bottom),
+                        maxRight, maxBottom, topSafe, LAYER_SCALE,
+                        bottomSafe = WindowSizing.GESTURE_BOTTOM_GAP
+                    )
+                    f2?.let {
+                        if (it[2] != out2.right || it[3] != out2.bottom) {
+                            reclampNote = ",越界复收(${out2.right},${out2.bottom}->${it[2]},${it[3]})"
+                        }
+                        out2 = Rect(it[0], it[1], it[2], it[3])
+                    }
+                }
+                lastSkip = "$pkg:resize-coord-invalid(帧${out.left},${out.top}→沿用${old.left},${old.top})$reclampNote"
                 probeMark("WRITE resize改坐标=无效 $key 帧=${out.left},${out.top},${out.right},${out.bottom} " +
                     "沿用旧坐标=${old.left},${old.top} 只更新尺寸 ${out.width()}x${out.height()}")
                 log("resize 改坐标 → 无效数据 $pkg：丢弃帧坐标 ${out.left},${out.top}，沿用记忆坐标 " +
