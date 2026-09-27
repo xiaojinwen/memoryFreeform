@@ -144,3 +144,36 @@
 
 ## 待查
 - shared_prefs 全空（设置从不落盘）疑点，未终判。
+
+## 圆角修复追加教训（fix151）
+- SurfaceFlinger `roundedCorner{x,y}` 采样会骗人：fix150 采样显示图层从首帧就是 67.14，
+  但用户视频里仍见方角——因为**测量的不是真正露方角的那个图层/那一帧**，或 system_server
+  钩子根本没在作用域里。
+- 排查任何 hook 行为前，先确认 `/data/system/memoryfreeform_hook.active` 是否存在；
+  没有 active 标记 = system_server 钩子未加载，**优先怀疑 LSPosed 作用域里 "系统框架" 被勾掉**。
+- 侧边栏开小窗会先走 system_server 的启动快照层（`Splash Screen`、`SnapshotStartingWindow`），
+  然后才轮到 SystemUI folme 动画；所以 system_server 侧必须有兜底（keeper/transaction clamp），
+  不能只靠 SystemUI。
+
+## ★ 上游调研定论（2026-09-27，查过 main 分支源码）
+- ★★ 2026-09-27 全生态结论：**没有任何同类开源模块处理过"小窗入场圆角补间露直角"**，
+  目前只有我们 fix144~fix149 那条 folme+transaction 双保险路线。
+  逐个查过并全量 grep（corner/folme/leash/SurfaceControl.Transaction）：
+  - `ReChronoRain/HyperCeiler` —— freeform 7 文件全是功能开关，零图层级圆角逻辑
+  - `LiuYiGL/MiFreeformEnhance`（自由小窗X 作者增强模块，2025-04）—— hook 了 SystemUI，
+    但全是隐藏 caption bar/通知白名单，**没有圆角/动画**；`SurfaceControl` 命中都在
+    `framwork-stub` 的 `setShadowSettings`（阴影，非圆角）里
+  - `XiHuYa/HyperGeoMem`（几何记忆，功能与我们高度重合）—— 只做 `setLaunchBounds` 记忆
+  - `oxohang/FanFreeform`（2026-08，最活跃）—— corner 全是侧边任务卡圆角设置 + 自绘手势预览
+  - `wumingmr/HyperOS3-freeform-unlock`、`echu2237/sidebar-hyperos` —— 仅解锁/侧边栏
+  跨仓库搜类名 `MultiTaskingFolmeState` 零命中。
+- **HyperCeiler（ReChronoRain/HyperCeiler）没有解决小窗圆角直角问题。**
+  全仓 grep `setCornerRadius|setCornerRadii|roundedCorner|SurfaceControl|Transaction|leash|folme`
+  命中全是**无关**：桌面图标/小组件圆角、最近任务卡片、输入法圆角内边距、模糊 Drawable 圆角。
+  小窗模块 `rules/systemframework/freeform/` 7 个文件全是功能开关（数量/黑白名单/贴边浮窗/
+  气泡/强制前台/跳转开小窗/通知开小窗/内容扩展/分享开小窗），无任何几何或圆角动画处理。
+  → 结论：**这块是空白地带，我们的 folme+transaction 双保险路线在同类里是独一份，别指望抄作业。**
+- HyperCeiler 的几何路线（`StickyFloatingWindows.patchActivityOptions`）与我们是同类：
+  `setLaunchWindowingMode(5)` + `options.setLaunchBounds(rect)` + `setMiuiConfigFlag(2)` +
+  injector `setFreeformScale(0.7f)`，**图层缩放同样用 0.70**（与我们 `MIUI_LAYER_SCALE` 一致）。
+  差别：它走 ActivityOptions 通道，我们 BirthHook 直接写 `LaunchParams.mBounds`（末点定音）。
