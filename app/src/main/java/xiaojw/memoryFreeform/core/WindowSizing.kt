@@ -72,7 +72,7 @@ object WindowSizing {
      * 取 dp 而不是硬编码 px：这台机 density=2.625，12dp ≈ 31px（约屏宽 2.9%），
      * 换分辨率的机器观感一致。上限 96px 兜底（异常 density 不至于让窗缩成一条）。
      */
-    const val SIDE_SAFE_DP = 12
+    const val SIDE_SAFE_DP = 6
 
     /** ★ fix177：左右安全距离（px）。App 侧用（有 [Context]）。 */
     fun sideSafePx(ctx: Context): Int =
