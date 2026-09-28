@@ -1500,18 +1500,11 @@ object MiuiFreeformRecordHook {
         log("记忆(系统侧·${if (landscape) "横屏" else "竖屏"}) $pkg -> ${out2.left},${out2.top},${out2.right},${out2.bottom}")
     }
 
-    /** 读记忆文件里某个键当前的矩形（`l,t,r,b`）；没有/解析失败返回 null。 */
-    private fun readMemoryRect(path: String, key: String): Rect? = runCatching {
-        val f = File(path)
-        if (!f.exists()) return null
-        for (l in f.readLines()) {
-            if (!l.startsWith("$key=")) continue
-            val v = l.substring(key.length + 1).split(",")
-            if (v.size < 4) return null
-            return Rect(v[0].trim().toInt(), v[1].trim().toInt(), v[2].trim().toInt(), v[3].trim().toInt())
-        }
-        null
-    }.getOrNull()
+    /** ★ fix180：读记忆委托 HookContract（内存热层→Settings.Global→文件兜底）。 */
+    private fun readMemoryRect(path: String, key: String): Rect? {
+        val arr = HookContract.readMemoryRect(path, key) ?: return null
+        return Rect(arr[0], arr[1], arr[2], arr[3])
+    }
 
     /**
      * ★ fix79：路由统一 —— 所有 freeform 小窗共用主文件一份记忆，键只按横竖屏分
@@ -1522,16 +1515,9 @@ object MiuiFreeformRecordHook {
     private fun computeRoute(pkg: String, landscape: Boolean): Pair<String, String> =
         HookContract.WINDOW_MEMORY_PATH to HookContract.memoryKey(pkg, landscape)
 
-    /** 只替换同一方向那一行（竖 `pkg=`/`pkg@SB=` / 横 `pkg@L=`/`pkg@SB@L=`），另一个方向不动。 */
+    /** ★ fix180：写记忆委托 HookContract（内存即时 + Settings.Global + 文件 tmp+rename 兜底）。 */
     private fun writeMemoryLine(path: String, key: String, value: String) {
-        runCatching {
-            val f = File(path)
-            val kept = if (f.exists()) f.readLines().filter { !it.startsWith("$key=") } else emptyList()
-            val tmp = File(path + ".tmp")
-            tmp.writeText((kept + "$key=$value").joinToString("\n") + "\n")
-            runCatching { tmp.setReadable(true, false); tmp.setWritable(true, false) }
-            tmp.renameTo(f)
-        }.onFailure { log("写 $path 失败 ${it.message}") }
+        HookContract.putMemoryRect(path, key, value)
     }
 
     // ---------------------------------------------------------------- ★ fix124 学习系统默认几何

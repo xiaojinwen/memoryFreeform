@@ -147,24 +147,35 @@ class SingleHandManager(private val context: Context) {
                 WindowMemory.clearAll()
                 runCatching {
                     val f = HookContract.WINDOW_MEMORY_PATH
-                    RootManager.get().executeFast("rm -f $f $f.tmp", 3000)
+                    val sf = HookContract.WINDOW_SCALE_PATH
+                    // ★ fix180：清记忆同时把 Settings.Global 那份也置空（hook 内存热层 300ms TTL 后失效）。
+                    RootManager.get().executeFast(
+                        "rm -f $f $f.tmp $sf $sf.tmp 2>/dev/null; " +
+                            "settings put global ${HookContract.MEMORY_GLOBAL_KEY} \"\" 2>/dev/null; " +
+                            "settings put global ${HookContract.SCALE_GLOBAL_KEY} \"\" 2>/dev/null",
+                        3000)
                 }.onFailure { Log.w(TAG, "clearWindowMemory(all) failed: ${it.message}") }
-                Log.i(TAG, "windowMemory: 已清空全部位置记忆")
+                Log.i(TAG, "windowMemory: 已清空全部位置记忆 + 缩放记忆")
             } else {
                 WindowMemory.clear(pkg)
                 runCatching {
                     val f = HookContract.WINDOW_MEMORY_PATH
+                    val sf = HookContract.WINDOW_SCALE_PATH
                     // ★ fix64：包里**两个方向**的行都要删（`pkg=` 与 `pkg@L=`）。
                     //   包名只可能含 `[A-Za-z0-9._]`，把 `.` 转义成 `[.]` 就够了；
                     //   **不要**用 `Regex.escape`（它给的是 `\Q…\E`，Android 的 toybox grep 不认）。
                     val pat = pkg.replace(".", "[.]")
+                    // ★ fix180：Settings.Global 那份也要去掉该包两行（system_server 内存 300ms 后失效）。
                     RootManager.get().executeFast(
                         "grep -vE '^$pat(@L)?=' $f > $f.tmp 2>/dev/null; " +
-                            "mv $f.tmp $f; chmod 666 $f 2>/dev/null",
-                        3000
-                    )
+                            "mv $f.tmp $f; chmod 666 $f 2>/dev/null; " +
+                        "grep -vE '^$pat(@L)?=' $sf > $sf.tmp 2>/dev/null; " +
+                            "mv $sf.tmp $sf; chmod 666 $sf 2>/dev/null; " +
+                        "settings put global ${HookContract.MEMORY_GLOBAL_KEY} \"\$(settings get global ${HookContract.MEMORY_GLOBAL_KEY} 2>/dev/null | grep -vE '^$pat(@L)?=')\" 2>/dev/null; " +
+                        "settings put global ${HookContract.SCALE_GLOBAL_KEY} \"\$(settings get global ${HookContract.SCALE_GLOBAL_KEY} 2>/dev/null | grep -vE '^$pat(@L)?=')\" 2>/dev/null",
+                        5000)
                 }.onFailure { Log.w(TAG, "clearWindowMemory($pkg) failed: ${it.message}") }
-                Log.i(TAG, "windowMemory: 已清空 $pkg 的位置记忆")
+                Log.i(TAG, "windowMemory: 已清空 $pkg 的位置记忆 + 缩放记忆")
             }
         }
     }

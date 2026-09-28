@@ -1,6 +1,10 @@
 package xiaojw.memoryFreeform.hook
 
 import java.io.File
+import java.util.concurrent.ConcurrentHashMap
+import android.content.Context
+import android.provider.Settings
+import de.robv.android.xposed.XposedHelpers
 import xiaojw.memoryFreeform.core.WindowSizing
 
 /**
@@ -168,24 +172,95 @@ object HookContract {
      */
     const val WINDOW_SCALE_PATH = "/data/system/memoryfreeform_window_scale"
 
-    // fix172：scale 读缓存（恢复链路在 binder 线程上，不能每次启动都开文件）。
-    private var scaleAt = 0L
-    private var scaleRaw = ""
+    /**
+     * ★ fix180：持久化键（Settings.Global）。与文件名同名，便于一次性迁移旧文件。
+     * system_server 内的 hook 写它（天然有权），App 经 root `settings get global` 读它
+     * （App 直读 `/data/system` 恒被 SELinux 挡、且普通 app 无 READ_SETTINGS 权限）。
+     */
+    const val SCALE_GLOBAL_KEY = "memoryfreeform_window_scale"
+    const val MEMORY_GLOBAL_KEY = "memoryfreeform_window_memory"
 
-    /** ★ fix172：读某包当前方向的缩放记忆（300ms 缓存；没有/解析失败返回 null）。 */
-    fun readWindowScale(pkg: String, landscape: Boolean): Float? = synchronized(this) {
-        val now = System.currentTimeMillis()
-        if (now - scaleAt > 300) {
-            scaleAt = now
-            scaleRaw = runCatching { File(WINDOW_SCALE_PATH).readText() }.getOrDefault("")
+    // fix180：system_server 内 system context（写 Settings.Global 需要 ContentResolver）。
+    // 普通 app 进程拿到的也是合法 context，但无 WRITE_SECURE_SETTINGS，不会用于写。
+    @Volatile private var sysCtx: Context? = null
+    private fun systemContext(): Context? {
+        if (sysCtx != null) return sysCtx
+        runCatching {
+            val at = XposedHelpers.callStaticMethod(
+                XposedHelpers.findClass("android.app.ActivityThread", null), "currentActivityThread")
+            sysCtx = XposedHelpers.callMethod(at, "getSystemContext") as? Context
         }
-        val key = memoryKey(pkg, landscape)
-        for (l in scaleRaw.lines()) {
+        return sysCtx
+    }
+
+    /** fix180：读 Settings.Global（持久化热层之上；system_server 写的键 App 经 root 也能读）。 */
+    private fun globalGet(key: String): String? =
+        runCatching { Settings.Global.getString(systemContext()?.contentResolver, key) }.getOrNull()
+
+    /** fix180：写 Settings.Global（整表序列化）；失败返回 false（调用方仍落文件兜底）。 */
+    private fun globalPut(key: String, value: String): Boolean =
+        runCatching { Settings.Global.putString(systemContext()?.contentResolver, key, value) }
+            .getOrDefault(false)
+
+    /**
+     * ★ fix180：缩放记忆 = **system_server 内存热层 + Settings.Global 持久化 + /data/system 文件兜底**。
+     *
+     * 为什么不再只用裸文件（fix172 的做法）：裸文件 SELinux 标签极敏感（曾踩"手建文件
+     * hook 写不进"的坑）、无原子写（整文件重写，异常关机可能半行损坏）、App 直读要 root cat。
+     * HyperCeiler 的同款记忆走 `system_server 内存 Map + Settings.Global`，本 ROM 拖边角改
+     * 的是渲染缩放（fix172 定论），记忆语义一致，直接照搬这套分层。
+     *
+     * 读优先级：内存热层（300ms TTL）→ Settings.Global → 文件（并把旧文件回填 Global，做迁移）。
+     * 写：内存即时生效 + 整表序列化写 Global + 整表写文件（兜底双写，Global 不可用时记忆不丢）。
+     * 300ms TTL 是刻意的：让 App 侧「清空记忆」删掉 Global/文件后，system_server 内存能在
+     * TTL 内失效、重读为空 —— 否则跨进程清不掉 system_server 的内存热层。
+     */
+    private val scaleMem = ConcurrentHashMap<String, Float>()
+    private var scaleMemAt = 0L
+    private const val MEM_TTL_MS = 300L
+
+    private fun parseScaleLine(text: String, key: String): Float? {
+        for (l in text.lineSequence()) {
             if (!l.startsWith("$key=")) continue
             val v = l.substring(key.length + 1).trim().toFloatOrNull() ?: return null
             return if (v in 0.05f..2.0f) v else null
         }
-        null
+        return null
+    }
+
+    private fun loadAllScale(): LinkedHashMap<String, Float> {
+        val text = globalGet(SCALE_GLOBAL_KEY)
+            ?: runCatching { File(WINDOW_SCALE_PATH).readText() }.getOrDefault("")
+        val m = LinkedHashMap<String, Float>()
+        for (l in text.lineSequence()) {
+            val i = l.indexOf('=')
+            if (i <= 0) continue
+            val k = l.substring(0, i).trim()
+            val v = l.substring(i + 1).trim().toFloatOrNull() ?: continue
+            if (v in 0.05f..2.0f) m[k] = v
+        }
+        return m
+    }
+
+    /** ★ fix180：读某包当前方向的缩放记忆（内存→Global→文件，300ms TTL）。 */
+    fun readWindowScale(pkg: String, landscape: Boolean): Float? {
+        val key = memoryKey(pkg, landscape)
+        val now = System.currentTimeMillis()
+        val cached = synchronized(scaleMem) {
+            if (now - scaleMemAt < MEM_TTL_MS) scaleMem[key] else null
+        }
+        cached?.let { return it }
+        globalGet(SCALE_GLOBAL_KEY)?.let { parseScaleLine(it, key) }?.let { v ->
+            synchronized(scaleMem) { scaleMem[key] = v; scaleMemAt = now }; return v
+        }
+        val f = runCatching { File(WINDOW_SCALE_PATH).readText() }.getOrDefault("")
+        val fv = parseScaleLine(f, key)
+        if (fv != null) {
+            globalPut(SCALE_GLOBAL_KEY, f) // 旧文件迁移进 Global（首次 / Global 暂不可用时）
+            synchronized(scaleMem) { scaleMem[key] = fv; scaleMemAt = now }
+            return fv
+        }
+        return null
     }
 
     /**
@@ -201,23 +276,106 @@ object HookContract {
         return if (v != null && v > 0.01f) v else WindowSizing.MIUI_LAYER_SCALE
     }
 
-    /** ★ fix172：写某包当前方向的缩放记忆（hook 写线程上调用，覆盖同键行）。 */
+    /** ★ fix180：写某包当前方向的缩放记忆（内存即时 + Settings.Global + 文件兜底）。 */
     fun writeWindowScale(pkg: String, landscape: Boolean, scale: Float) {
+        val key = memoryKey(pkg, landscape)
+        synchronized(scaleMem) { scaleMem[key] = scale; scaleMemAt = System.currentTimeMillis() }
+        val all = loadAllScale()
+        all[key] = scale
+        val text = all.map { "${it.key}=${it.value}" }.joinToString("\n")
+        globalPut(SCALE_GLOBAL_KEY, text)
         runCatching {
-            val key = memoryKey(pkg, landscape)
-            val f = File(WINDOW_SCALE_PATH)
-            val rest = if (f.exists()) f.readLines().filter { it.isNotBlank() && !it.startsWith("$key=") }
-            else emptyList()
-            f.writeText((rest + "$key=$scale").joinToString("\n") + "\n")
+            val f = File(WINDOW_SCALE_PATH); f.writeText(text + "\n")
             runCatching { f.setReadable(true, false) }
-            synchronized(this) { scaleAt = 0L } // 失效缓存
         }
     }
 
-    /** ★ fix172：清空缩放记忆（App 侧清记忆 / 改尺寸设置时随 [WINDOW_MEMORY_PATH] 一起清）。 */
+    /** ★ fix180：清空缩放记忆（内存 + Settings.Global + 文件，三处都清）。 */
     fun wipeWindowScale() {
+        synchronized(scaleMem) { scaleMem.clear(); scaleMemAt = 0L }
+        globalPut(SCALE_GLOBAL_KEY, "")
         runCatching { File(WINDOW_SCALE_PATH).delete() }
-        synchronized(this) { scaleAt = 0L; scaleRaw = "" }
+    }
+
+    /**
+     * ★ fix180：位置记忆（bounds）同构分层：内存热层 + Settings.Global + 文件兜底。
+     * 仅 [WINDOW_MEMORY_PATH] 进 Settings.Global；[DEFAULT_RECT_PATH] 等系统内部量仍只走文件
+     * （它频率极低、且不是"用户记忆数据"，没必要进 Global）。
+     */
+    private val rectMem = ConcurrentHashMap<String, IntArray>()
+    private var rectMemAt = 0L
+
+    private fun parseRectLine(text: String, key: String): IntArray? {
+        for (l in text.lineSequence()) {
+            val i = l.indexOf('=')
+            if (i <= 0 || l.substring(0, i).trim() != key) continue
+            val v = l.substring(i + 1).split(",").mapNotNull { it.trim().toIntOrNull() }
+            if (v.size == 4 && v[2] > v[0] && v[3] > v[1]) return intArrayOf(v[0], v[1], v[2], v[3])
+        }
+        return null
+    }
+
+    private fun loadAllRect(path: String): LinkedHashMap<String, IntArray> {
+        val gkey = if (path == WINDOW_MEMORY_PATH) MEMORY_GLOBAL_KEY else null
+        val text = if (gkey != null) {
+            globalGet(gkey) ?: runCatching { File(path).readText() }.getOrDefault("")
+        } else {
+            runCatching { File(path).readText() }.getOrDefault("")
+        }
+        val m = LinkedHashMap<String, IntArray>()
+        for (l in text.lineSequence()) {
+            val i = l.indexOf('=')
+            if (i <= 0) continue
+            val k = l.substring(0, i).trim()
+            val v = l.substring(i + 1).split(",").mapNotNull { it.trim().toIntOrNull() }
+            if (v.size == 4 && v[2] > v[0] && v[3] > v[1]) m[k] = intArrayOf(v[0], v[1], v[2], v[3])
+        }
+        return m
+    }
+
+    /** ★ fix180：读位置记忆（内存→Global→文件，300ms TTL）。 */
+    fun readMemoryRect(path: String, key: String): IntArray? {
+        val now = System.currentTimeMillis()
+        val cached = synchronized(rectMem) {
+            if (now - rectMemAt < MEM_TTL_MS) rectMem[key] else null
+        }
+        cached?.let { return it }
+        val gkey = if (path == WINDOW_MEMORY_PATH) MEMORY_GLOBAL_KEY else null
+        if (gkey != null) {
+            globalGet(gkey)?.let { parseRectLine(it, key) }?.let { v ->
+                synchronized(rectMem) { rectMem[key] = v; rectMemAt = now }; return v
+            }
+        }
+        val f = runCatching { File(path).readText() }.getOrDefault("")
+        val fv = parseRectLine(f, key)
+        if (fv != null) {
+            if (gkey != null) globalPut(gkey, f)
+            synchronized(rectMem) { rectMem[key] = fv; rectMemAt = now }
+            return fv
+        }
+        return null
+    }
+
+    /** ★ fix180：写位置记忆（内存即时 + 仅 WINDOW_MEMORY_PATH 进 Global + 文件 tmp+rename 兜底）。 */
+    fun putMemoryRect(path: String, key: String, value: String) {
+        val rect = runCatching {
+            val v = value.split(",").mapNotNull { it.trim().toIntOrNull() }
+            if (v.size == 4) intArrayOf(v[0], v[1], v[2], v[3]) else null
+        }.getOrNull() ?: return
+        synchronized(rectMem) { rectMem[key] = rect; rectMemAt = System.currentTimeMillis() }
+        val gkey = if (path == WINDOW_MEMORY_PATH) MEMORY_GLOBAL_KEY else null
+        if (gkey != null) {
+            val all = loadAllRect(path); all[key] = rect
+            globalPut(gkey, all.map { "${it.key}=${it.value.joinToString(",")}" }.joinToString("\n"))
+        }
+        runCatching {
+            val f = File(path)
+            val kept = if (f.exists()) f.readLines().filter { !it.startsWith("$key=") } else emptyList()
+            val tmp = File(path + ".tmp")
+            tmp.writeText((kept + "$key=$value").joinToString("\n") + "\n")
+            runCatching { tmp.setReadable(true, false); tmp.setWritable(true, false) }
+            tmp.renameTo(f)
+        }
     }
 
     /** ★ fix128 / ★ fix142：[FLAGS_PATH] 里 `rememberSize` 的当前值（300ms 缓存；缺失 = false）。 */

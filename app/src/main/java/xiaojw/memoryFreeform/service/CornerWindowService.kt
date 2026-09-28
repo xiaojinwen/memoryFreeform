@@ -605,10 +605,15 @@ class CornerWindowService : Service() {
             runCatching {
                 // ★ fix79：记忆统一一份，只有主文件（SB 文件已废弃，由记录钩子启动时迁移删除）。
                 // ★ fix172：缩放记忆（freeformScale）也是「大小」的一部分，随主文件一起清。
+                // ★ fix180：Settings.Global 那份也置空（hook 内存热层 300ms TTL 后失效）。
                 val f = HookContract.WINDOW_MEMORY_PATH
                 val sf = HookContract.WINDOW_SCALE_PATH
-                RootManager.get().executeFast("rm -f $f $f.tmp $sf $sf.tmp", 3000)
-                SHLog.i(TAG, "windowMemory: 已清掉 system 侧记忆 $f + 缩放记忆 $sf")
+                RootManager.get().executeFast(
+                    "rm -f $f $f.tmp $sf $sf.tmp 2>/dev/null; " +
+                        "settings put global ${HookContract.MEMORY_GLOBAL_KEY} \"\" 2>/dev/null; " +
+                        "settings put global ${HookContract.SCALE_GLOBAL_KEY} \"\" 2>/dev/null",
+                    3000)
+                SHLog.i(TAG, "windowMemory: 已清掉 system 侧记忆 $f + 缩放记忆 $sf + Settings.Global")
             }.onFailure { SHLog.w(TAG, "清 system 位置记忆失败: ${it.message}") }
         }.apply { name = "wipe-wmem"; isDaemon = true }.start()
     }
@@ -1471,12 +1476,24 @@ class CornerWindowService : Service() {
      * 读不到（su 忙 / 无记忆）返回 null，调用方退回 SP / 设置值。
      */
     private fun readSystemMemoryRect(pkg: String, landscape: Boolean): IntArray? {
+        val key = HookContract.memoryKey(pkg, landscape)
+        // ★ fix180：优先读 Settings.Global（root，hook 写的持久化层），回退旧文件。
         return runCatching {
+            val g = RootManager.get().executeFast(
+                "settings get global ${HookContract.MEMORY_GLOBAL_KEY} 2>/dev/null", 2000)
+            if (g.success && g.output.isNotBlank()) {
+                for (line in g.output.lineSequence()) {
+                    val i = line.indexOf('=')
+                    if (i <= 0 || line.substring(0, i).trim() != key) continue
+                    val v = line.substring(i + 1).split(",").mapNotNull { it.trim().toIntOrNull() }
+                    if (v.size == 4 && v[2] > v[0] && v[3] > v[1]) {
+                        return@runCatching intArrayOf(v[0], v[1], v[2], v[3])
+                    }
+                }
+            }
             val res = RootManager.get().executeFast(
-                "cat ${HookContract.WINDOW_MEMORY_PATH} 2>/dev/null", 2000
-            )
+                "cat ${HookContract.WINDOW_MEMORY_PATH} 2>/dev/null", 2000)
             if (!res.success || res.output.isBlank()) return@runCatching null
-            val key = HookContract.memoryKey(pkg, landscape)
             for (line in res.output.lineSequence()) {
                 val i = line.indexOf('=')
                 if (i <= 0 || line.substring(0, i).trim() != key) continue
@@ -1494,17 +1511,27 @@ class CornerWindowService : Service() {
      * 与 [readSystemMemoryRect] 同一条路（App 进程直读 `/data/system` 恒被 SELinux 挡掉）。
      */
     private fun readSystemWindowScale(pkg: String, landscape: Boolean): Float? {
+        val key = HookContract.memoryKey(pkg, landscape)
+        // ★ fix180：优先读 Settings.Global（root，hook 写的持久化层），回退旧文件。
         return runCatching {
+            val g = RootManager.get().executeFast(
+                "settings get global ${HookContract.SCALE_GLOBAL_KEY} 2>/dev/null", 2000)
+            if (g.success && g.output.isNotBlank()) {
+                for (line in g.output.lineSequence()) {
+                    val i = line.indexOf('=')
+                    if (i <= 0 || line.substring(0, i).trim() != key) continue
+                    val v = line.substring(i + 1).trim().toFloatOrNull() ?: continue
+                    if (v in 0.05f..2.0f) return@runCatching v
+                }
+            }
             val res = RootManager.get().executeFast(
-                "cat ${HookContract.WINDOW_SCALE_PATH} 2>/dev/null", 2000
-            )
+                "cat ${HookContract.WINDOW_SCALE_PATH} 2>/dev/null", 2000)
             if (!res.success || res.output.isBlank()) return@runCatching null
-            val key = HookContract.memoryKey(pkg, landscape)
             for (line in res.output.lineSequence()) {
                 val i = line.indexOf('=')
                 if (i <= 0 || line.substring(0, i).trim() != key) continue
-                val v = line.substring(i + 1).trim().toFloatOrNull() ?: return@runCatching null
-                return@runCatching if (v in 0.05f..2.0f) v else null
+                val v = line.substring(i + 1).trim().toFloatOrNull() ?: continue
+                if (v in 0.05f..2.0f) return@runCatching v
             }
             null
         }.getOrNull()

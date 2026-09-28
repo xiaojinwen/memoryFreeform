@@ -530,12 +530,6 @@ object MiuiFreeFormBirthHook {
             }
         }
 
-        val mraw = if (now - memCachedAt > MEM_READ_INTERVAL_MS) {
-            memCachedAt = now
-            runCatching { File(HookContract.WINDOW_MEMORY_PATH).readText() }
-                .getOrDefault("").also { memCachedRaw = it }
-        } else memCachedRaw
-
         // ★ fix164b：旋转判断也用兜底屏，size 为空时不再默认竖屏（会取错方向记忆）。
         val landscape = (size ?: systemScreenSize())?.let { it[0] > it[1] } ?: false
 
@@ -544,12 +538,15 @@ object MiuiFreeFormBirthHook {
         val drawRaw = runCatching { File(HookContract.DEFAULT_RECT_PATH).readText() }.getOrDefault("")
         val drect = parseMemory(drawRaw, HookContract.defaultKey(landscape))
 
-        // ★ ① 持久记忆：只认**当前方向**那一条，且必须放得进当前屏幕才用。
+        // ★ fix180：位置记忆读 HookContract（内存热层→Settings.Global→文件兜底），
+        //   只认**当前方向**那一条，且必须放得进当前屏幕才用。
         //   ⚠ 不在这里改尺寸：App 侧故意下发的"超屏补偿矩形"（图层缩放 0.7 时才出现）
         //   不能被这里缩小，否则窗口会比用户设置的小一圈。
-        if (mraw.isNotBlank()) {
+        val memArr = HookContract.readMemoryRect(
+            HookContract.WINDOW_MEMORY_PATH, HookContract.memoryKey(pkg, landscape))
+        if (memArr != null) {
             val key = HookContract.memoryKey(pkg, landscape)
-            val rect = parseMemory(mraw, key)
+            val rect = memArr
             // ★ fix76：fit 上限从「屏幕 / 0.70」改为「荒谬值兜底（屏幕 × 4）」。fix42 实测
             //   freeform 窗口正坐标超界被系统原样接受（right 到 3000 都生效），只有负坐标非法；
             //   fix69 用「屏幕/0.70 = 1542」当上限会把用户拖到屏幕边缘外的合法位置（right 1690）
