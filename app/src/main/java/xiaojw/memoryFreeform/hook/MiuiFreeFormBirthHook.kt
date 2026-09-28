@@ -284,13 +284,16 @@ object MiuiFreeFormBirthHook {
                 // ⚠ fix46 这里写的是 `param.args.firstOrNull()` —— 对 addLaunch 而言
                 //   第一个参数是 RootWindowContainer，不是 options，于是 applied 恒 0
                 //   （真机实测 calls=4 applied=0）。必须按类型找。
-                ok = applyToOptions(param.result, rect) ||
-                    applyToOptions(param.args.firstOrNull { isOptions(it) }, rect)
+                val land = isLandscape(param.args)
+                ok = applyToOptions(param.result, rect, lastPkg, land) ||
+                    applyToOptions(param.args.firstOrNull { isOptions(it) }, rect, lastPkg, land)
             }
             Kind.PARAMS -> {
                 ok = applyToLaunchParams(param.args, rect)
                 // 顺带把 options 也对齐，免得下游还有路径读 options
-                applyToOptions(param.args.firstOrNull { isOptions(it) }, rect)
+                applyToOptions(
+                    param.args.firstOrNull { isOptions(it) }, rect, lastPkg, isLandscape(param.args)
+                )
             }
             else -> Unit
         }
@@ -308,7 +311,7 @@ object MiuiFreeFormBirthHook {
 
     private fun isOptions(o: Any?) = o != null && o.javaClass.name == "android.app.ActivityOptions"
 
-    private fun applyToOptions(o: Any?, rect: Rect): Boolean {
+    private fun applyToOptions(o: Any?, rect: Rect, pkg: String?, landscape: Boolean): Boolean {
         if (!isOptions(o)) return false
         val a = runCatching {
             XposedHelpers.callMethod(o, "setLaunchBounds", rect)
@@ -318,7 +321,42 @@ object MiuiFreeFormBirthHook {
                 XposedHelpers.callMethod(o, "setLaunchWindowingMode", FREEFORM_MODE)
             }
         }.isSuccess
+        // ★ fix172b：**「大小」的真身是 freeformScale，不是 bounds**。
+        //   真机实证：用户按住拖小窗边角 6.4 秒，Task bounds 一像素没变，
+        //   而 SurfaceFlinger `toDisplayTransform` 的 scale 从 0.70 变到 0.4731 ——
+        //   拖边角改的是 task surface 的渲染缩放（我们常驻的 0.70 就是它的默认档）。
+        //   所以只写 bounds 永远恢复不了「大小」，必须把缩放一起注入启动选项。
+        //   走上游已验证的路（HyperCeiler `StickyFloatingWindows`）：
+        //   `ActivityOptions.getActivityOptionsInjector().setFreeformScale(scale)`。
+        applyScaleToOptions(o, pkg, landscape)
         return a
+    }
+
+    /** ★ fix172b：向 [ActivityOptions] 注入该包记忆的图层缩放；没记忆/开关关则不动。 */
+    private fun applyScaleToOptions(o: Any?, pkg: String?, landscape: Boolean): Boolean {
+        val p = pkg
+        if (p == null || p == "-" || !HookContract.rememberSizeEnabled()) return false
+        val scale = HookContract.readWindowScale(p, landscape) ?: return false
+        val ok = runCatching {
+            val injector = XposedHelpers.callMethod(o, "getActivityOptionsInjector")
+            XposedHelpers.callMethod(injector, "setFreeformScale", scale)
+        }.isSuccess
+        if (!ok) {
+            // 兜底：直接写字段（MiFreeFormX 用的就是 `mFreeformScale` 这个字段名）
+            val ok2 = runCatching {
+                val injector = XposedHelpers.callMethod(o, "getActivityOptionsInjector")
+                XposedHelpers.setFloatField(injector, "mFreeformScale", scale)
+            }.isSuccess
+            if (!ok2) return false
+        }
+        log("注入小窗缩放 $p -> $scale（bounds 之外的「大小」）")
+        return true
+    }
+
+    /** ★ fix172b：本次启动是否横屏（缩放记忆按方向分键，与 bounds 记忆同口径）。 */
+    private fun isLandscape(args: Array<Any?>): Boolean {
+        val sz = runCatching { readDisplaySize(args) }.getOrNull() ?: return false
+        return sz.size >= 2 && sz[0] > sz[1]
     }
 
     private fun clearBounds(args: Array<Any?>) {
@@ -605,14 +643,21 @@ object MiuiFreeFormBirthHook {
             log("目标未钳制 $lastPkg（屏幕尺寸全读不到，放弃收边）: [${t.l},${t.t}][${t.r},${t.b}]")
             return t
         }
-        val maxW = (s[0] / LAYER_SCALE).toInt().coerceAtLeast(WindowSizing.MIN_SIDE)
-        val maxH = (s[1] / LAYER_SCALE).toInt().coerceAtLeast(WindowSizing.MIN_SIDE)
+        // ★ fix177：**实际渲染缩放**（记忆里的 freeformScale，没有则默认档 0.70）。
+        //   恒用 0.70 会把"拉小的窗"当成满屏宽 → 位置上限算成 0 → 窗被吸到左边缘
+        //   （用户报的"实际显示大小与边界判定不一致"）。
+        val fs = HookContract.effectiveScale(t.pkg, s[0] > s[1])
+        val maxW = (s[0] / fs).toInt().coerceAtLeast(WindowSizing.MIN_SIDE)
+        val maxH = (s[1] / fs).toInt().coerceAtLeast(WindowSizing.MIN_SIDE)
         val topSafe = if (s[0] > s[1]) statusBarHeightSystem() else 0
         // ★ fix166b：底部预留手势条安全区（GESTURE_BOTTOM_GAP），不让小窗底边吃掉
         //   全面屏手势条（上滑回桌面 / 多任务）。
+        // ★ fix177：左右同样留安全距离，与 App 侧 [xiaojw.memoryFreeform.service.CornerWindowService]
+        //   下发前那次钳制同口径。
         val r = WindowSizing.clampRect(
-            intArrayOf(t.l, t.t, t.r, t.b), s[0], s[1], topSafe, LAYER_SCALE,
-            bottomSafe = WindowSizing.GESTURE_BOTTOM_GAP
+            intArrayOf(t.l, t.t, t.r, t.b), s[0], s[1], topSafe, fs,
+            bottomSafe = WindowSizing.GESTURE_BOTTOM_GAP,
+            sideSafe = WindowSizing.sideSafeSystemPx()
         ) ?: return t
         if (r[0] != t.l || r[1] != t.t || r[2] != t.r || r[3] != t.b) {
             memSkip = "越界修正(${t.l},${t.t},${t.r},${t.b}->${r[0]},${r[1]},${r[2]},${r[3]})"

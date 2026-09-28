@@ -604,9 +604,11 @@ class CornerWindowService : Service() {
         Thread {
             runCatching {
                 // ★ fix79：记忆统一一份，只有主文件（SB 文件已废弃，由记录钩子启动时迁移删除）。
+                // ★ fix172：缩放记忆（freeformScale）也是「大小」的一部分，随主文件一起清。
                 val f = HookContract.WINDOW_MEMORY_PATH
-                RootManager.get().executeFast("rm -f $f $f.tmp", 3000)
-                SHLog.i(TAG, "windowMemory: 已清掉 system 侧记忆 $f")
+                val sf = HookContract.WINDOW_SCALE_PATH
+                RootManager.get().executeFast("rm -f $f $f.tmp $sf $sf.tmp", 3000)
+                SHLog.i(TAG, "windowMemory: 已清掉 system 侧记忆 $f + 缩放记忆 $sf")
             }.onFailure { SHLog.w(TAG, "清 system 位置记忆失败: ${it.message}") }
         }.apply { name = "wipe-wmem"; isDaemon = true }.start()
     }
@@ -1320,6 +1322,15 @@ class CornerWindowService : Service() {
     private fun bottomGap(): Int = navAvoidPx().coerceAtLeast(WindowSizing.GESTURE_BOTTOM_GAP)
 
     /**
+     * ★ fix177：**左右两侧**的安全距离（px）。
+     *
+     * 与 [bottomGap] 同层级的一个"边界留白"，只是上下那份是"别吃掉手势条"，
+     * 左右这份是"别贴死屏幕边"—— 满宽的小窗贴在屏幕左右沿时侧边返回手势被吃掉，
+     * 窗口圆角也看不出来。取值见 [WindowSizing.sideSafePx]。
+     */
+    private fun sideGapPx(): Int = WindowSizing.sideSafePx(this)
+
+    /**
      * 屏幕**真实**分辨率（含状态栏/导航栏区域）。
      *
      * 不能用 `resources.displayMetrics` —— 本机实测它给 1080x**2292**，比真实
@@ -1479,6 +1490,44 @@ class CornerWindowService : Service() {
     }
 
     /**
+     * ★ fix177：经 root 读 system_server 写的**缩放记忆**（[HookContract.WINDOW_SCALE_PATH]）。
+     * 与 [readSystemMemoryRect] 同一条路（App 进程直读 `/data/system` 恒被 SELinux 挡掉）。
+     */
+    private fun readSystemWindowScale(pkg: String, landscape: Boolean): Float? {
+        return runCatching {
+            val res = RootManager.get().executeFast(
+                "cat ${HookContract.WINDOW_SCALE_PATH} 2>/dev/null", 2000
+            )
+            if (!res.success || res.output.isBlank()) return@runCatching null
+            val key = HookContract.memoryKey(pkg, landscape)
+            for (line in res.output.lineSequence()) {
+                val i = line.indexOf('=')
+                if (i <= 0 || line.substring(0, i).trim() != key) continue
+                val v = line.substring(i + 1).trim().toFloatOrNull() ?: return@runCatching null
+                return@runCatching if (v in 0.05f..2.0f) v else null
+            }
+            null
+        }.getOrNull()
+    }
+
+    /**
+     * ★ fix177：**这一次开窗真正会生效的渲染缩放**（边界钳制必须用它）。
+     *
+     * 「大小」的真身是 `freeformScale`（拖边角改的就是它，Task bounds 全程不动 ——
+     * fix172 真机取证）；它的默认档 0.70 正好等于 [WindowSizing.MIUI_LAYER_SCALE]。
+     *
+     * ⚠ 不能一律按 0.70 钳制：用户把窗拉小到 0.45 之后，`视觉宽 = 下发宽 × 0.70` 会把
+     *   一个实际只有 694px 宽的窗当成 1080px 满屏宽，`maxLeft` 被算成 0 ⇒ 明明很窄的窗
+     *   每次重开都被**强行吸到左边缘** —— 这就是用户报的"实际显示大小与边界判定不一致"。
+     *
+     * 读不到缩放记忆（首次开窗 / 还没拉过）退回 [HookBridge.miuiLayerScale]（默认 0.70）。
+     */
+    private fun effectiveScale(pkg: String, landscape: Boolean): Float {
+        val v = readSystemWindowScale(pkg, landscape) ?: HookBridge.miuiLayerScale()
+        return if (v > 0.01f) v else WindowSizing.MIUI_LAYER_SCALE
+    }
+
+    /**
      * ★ fix111：开窗几何**只认记忆** —— 有记忆返回下发矩形，没记忆返回 null
      * （调用方走"纯 start"，让澎湃自己给默认小窗几何，出生/关闭时钩子会自动登记）。
      *
@@ -1496,8 +1545,9 @@ class CornerWindowService : Service() {
         // ★ fix64：屏幕宽 > 高 = 横屏（realScreenSize 跟随旋转）。记忆按方向分开存，
         //   读的时候**必须**带上方向，否则会拿竖屏的矩形去横屏用。
         val landscape = screenW > screenH
-        // 图层缩放（下发坐标收边上限要 ÷ 它：0.70 语义下合法下发值可以超物理屏）
-        val scale = HookBridge.miuiLayerScale()
+        // ★ fix177：收边用的**实际渲染缩放**（记忆里的 freeformScale，缺省 0.70）。
+        //   以前恒用 0.70 → 拉小的窗被当成满屏宽、位置被吸到左边（边界判定与实际显示不符）。
+        val scale = effectiveScale(pkg, landscape)
         val limW = (screenW / scale).toInt().coerceAtLeast(WindowSizing.MIN_SIDE)
         val limH = (usableH / scale).toInt().coerceAtLeast(WindowSizing.MIN_SIDE)
 
@@ -1530,7 +1580,11 @@ class CornerWindowService : Service() {
         val raw = intArrayOf(mem[0], mem[1], mem[0] + w, mem[1] + h)
         // ★ fix166：包络改用真实屏尺寸 + scale（不再传"已÷scale"的 limW/limH，否则位置上限算错）。
         // ★ fix166b：包络 = 真实屏 + scale + 顶部让位 + 底部手势安全区（bottomSafe 同一口径）。
-        val fitted = WindowSizing.clampRect(raw, screenW, screenH, usableTop, scale, bottomSafe = bottomGap())
+        // ★ fix177：再加左右安全距离（sideSafe），窗口不再贴死屏幕左右沿。
+        val fitted = WindowSizing.clampRect(
+            raw, screenW, screenH, usableTop, scale,
+            bottomSafe = bottomGap(), sideSafe = sideGapPx()
+        )
         if (fitted == null) {
             SHLog.w(TAG, "windowMemory: $pkg 的记忆没法收进当前屏幕，交系统默认")
             return null
@@ -1546,8 +1600,9 @@ class CornerWindowService : Service() {
                 (if (corrected) " ⚠越界已自动修正 -> " else " -> ") +
                 "${fitted[2] - fitted[0]}x${fitted[3] - fitted[1]} @ [${fitted[0]},${fitted[1]}]" +
                 "（包络 ${limW}x$limH，" +
-                "屏幕 ${screenW}x$screenH ÷ 图层缩放 ${"%.3f".format(scale)}，" +
-                "★fix86 顶部让出=$usableTop，底部手势安全=${bottomGap()}）"
+                "屏幕 ${screenW}x$screenH ÷ 实际缩放 ${"%.3f".format(scale)}，" +
+                "★fix86 顶部让出=$usableTop，底部手势安全=${bottomGap()}，" +
+                "★fix177 左右安全=${sideGapPx()}）"
         )
         return fitted
     }
@@ -1709,14 +1764,19 @@ class CornerWindowService : Service() {
         if (actualRect != null) {
             val (sw, sh) = realScreenSize()
             val topAvoid = topAvoidPx()
-            val scale = HookBridge.miuiLayerScale()
+            // ★ fix177：与实际显示同一口径 —— 用记忆里的实际缩放，不再恒用 0.70。
+            val scale = effectiveScale(pkg, sw > sh)
             val limW = ((sw / scale).toInt()).coerceAtLeast(WindowSizing.MIN_SIDE)
             val limH = (
                 (sh - bottomGap() - topAvoid) / scale
             ).toInt().coerceAtLeast(WindowSizing.MIN_SIDE)
             // ★ fix166：钳制传真实屏 + scale（limW/limH 仅用于日志展示下发域包络）。
             // ★ fix166b：底边让出手势条安全区（bottomSafe 与系统钩子同一口径）。
-            val fit = WindowSizing.clampRect(actualRect, sw, sh, topAvoid, scale, bottomSafe = bottomGap())
+            // ★ fix177：左右同样留安全距离（sideGapPx），与下发前那次钳制完全一致。
+            val fit = WindowSizing.clampRect(
+                actualRect, sw, sh, topAvoid, scale,
+                bottomSafe = bottomGap(), sideSafe = sideGapPx()
+            )
             if (fit != null && !fit.contentEquals(actualRect)) {
                 SHLog.w(
                     TAG,

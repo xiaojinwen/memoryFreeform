@@ -63,6 +63,38 @@ object WindowSizing {
     const val GESTURE_BOTTOM_GAP = 40
 
     /**
+     * ★ fix177：小窗左右两侧的**安全距离**（dp）。
+     *
+     * 由来：以前只有上下（[GESTURE_BOTTOM_GAP] / 横屏 `topSafe`）有安全区，左右是 0，
+     * 于是"拉到最大"的小窗视觉宽正好等于屏宽，左右两条边**贴死屏幕边** —— 侧边返回手势
+     * 被吃掉、窗口边缘也看不出圆角。用户要求"边界左右两边也留一些安全距离"。
+     *
+     * 取 dp 而不是硬编码 px：这台机 density=2.625，12dp ≈ 31px（约屏宽 2.9%），
+     * 换分辨率的机器观感一致。上限 96px 兜底（异常 density 不至于让窗缩成一条）。
+     */
+    const val SIDE_SAFE_DP = 12
+
+    /** ★ fix177：左右安全距离（px）。App 侧用（有 [Context]）。 */
+    fun sideSafePx(ctx: Context): Int =
+        sideSafePx(runCatching { ctx.resources.displayMetrics.density }.getOrDefault(1f))
+
+    /**
+     * ★ fix177：左右安全距离（px）。system_server 侧用（只有 density，没有 [Context]）。
+     * 与 [sideSafePx] 同一个公式，保证出生/记录钩子与 App 侧**同一口径**。
+     */
+    fun sideSafePx(density: Float): Int =
+        ((if (density > 0.1f) density else 1f) * SIDE_SAFE_DP).toInt().coerceIn(0, 96)
+
+    /**
+     * ★ fix177：system_server 侧的左右安全距离（px）。
+     * 出生 / 记录钩子没有 [Context]，但它们有 `Resources.getSystem()`（与
+     * `statusBarHeight` 那套兜底同源），这里直接取它的 density。
+     */
+    fun sideSafeSystemPx(): Int = runCatching {
+        sideSafePx(android.content.res.Resources.getSystem().displayMetrics.density)
+    }.getOrDefault(0)
+
+    /**
      * ★ fix42：澎湃（HyperOS 3）给 Freeform 窗口的**图层缩放**。实测恒为 0.70。
      *
      * 这是从 SurfaceFlinger 抓到的硬数据，不是估算：
@@ -212,8 +244,13 @@ object WindowSizing {
      * @param topSafe 允许的最小 `top`（横屏状态栏高度，fix86）
      * @param bottomSafe 允许的最大 `bottom` 上方距离（竖屏底部留安全距离防全面屏手势条，fix166b）；
      *   传 [GESTURE_BOTTOM_GAP] 即"至少露出手势区"，传用户「离底边间距」则两取大
+     * @param sideSafe 左右两侧的安全距离（fix177）：视觉 left ≥ sideSafe 且视觉 right ≤ sw − sideSafe
      * @param minSide 最小边长（低于这个就不是能用的小窗）
-     * @param scale 图层缩放（默认 [MIUI_LAYER_SCALE]；本就是视觉↔下发的换算系数）
+     * @param scale ★ fix177：**实际渲染缩放**（= `freeformScale`，拖边角改的就是它）。
+     *   默认 [MIUI_LAYER_SCALE]（0.70，即该值的默认档）。⚠ 必须传**当前这次开窗真正会
+     *   生效的缩放**，不能一律用 0.70 —— 用户把窗拉小到 0.45 后，0.70 会误判"视觉宽
+     *   = 下发宽×0.70 = 满屏"，把 `maxLeft` 算成 0，于是明明很窄的窗被**强行吸到左边**
+     *   （用户报的"实际显示大小与边界判定不一致"）。
      */
     fun fitBounds(
         rect: IntArray,
@@ -221,6 +258,7 @@ object WindowSizing {
         screenH: Int,
         topSafe: Int = 0,
         bottomSafe: Int = 0,
+        sideSafe: Int = 0,
         minSide: Int = MIN_SIDE,
         scale: Float = MIUI_LAYER_SCALE
     ): IntArray {
@@ -231,10 +269,13 @@ object WindowSizing {
         val sh = screenH.coerceAtLeast(1)
         val top = topSafe.coerceAtLeast(0)
         val bottom = bottomSafe.coerceAtLeast(0)
+        // ★ fix177：左右安全区。宽度上限**扣掉两侧**（否则满宽窗会把 min/maxLeft 挤成
+        //   min > max，`coerceIn` 直接抛 IllegalArgumentException）。
+        val side = sideSafe.coerceAtLeast(0).coerceAtMost((sw - 1) / 2)
         // 下发域尺寸上限：视觉宽高 = 下发宽高 × s ≤ 真实屏可用区。高度上限**再扣掉
         // topSafe + bottom**（fix166b：底部手势条安全区），保证「视觉 top ≥ top」与
         // 「视觉 bottom ≤ sh − bottom」不冲突（否则高窗会把 top 顶成负数、或底边吃掉手势条）。
-        val mwD = (sw / s).toInt().coerceAtLeast(1)
+        val mwD = ((sw - side * 2) / s).toInt().coerceAtLeast(1)
         val mhD = ((sh - top - bottom) / s).toInt().coerceAtLeast(1)
         val loW = minSide.coerceAtMost(mwD)
         val loH = minSide.coerceAtMost(mhD)
@@ -247,11 +288,12 @@ object WindowSizing {
         //   视觉 bottom = top + 下发高×s ≤ sh − bottom  ⇒  top ≤ sh − bottom − 下发高×s
         val vWf = w * s
         val vHf = h * s
-        val maxLeft = (sw - vWf).coerceAtLeast(0f)
+        // ★ fix177：左右都留安全区 —— 视觉 left ≥ side、视觉 right ≤ sw − side。
+        val maxLeft = (sw - side - vWf).coerceAtLeast(side.toFloat())
         // ★ fix166b：底部绝不吃掉全面屏手势条 —— 视觉底 ≤ sh − bottom。
         val maxTop = (sh - bottom - vHf).coerceAtLeast(top.toFloat())
         // 下发坐标是整数像素，用 floor（正数 toInt 即截断）保证视觉右/底不越过 sw / (sh−bottom)。
-        val l = rect[0].coerceIn(0, maxLeft.toInt())
+        val l = rect[0].coerceIn(side, maxLeft.toInt())
         val t = rect[1].coerceIn(top, maxTop.toInt())
         return intArrayOf(l, t, l + w, t + h)
     }
@@ -281,10 +323,11 @@ object WindowSizing {
         screenH: Int,
         minTop: Int = 0,
         scale: Float = MIUI_LAYER_SCALE,
-        bottomSafe: Int = 0
+        bottomSafe: Int = 0,
+        sideSafe: Int = 0
     ): IntArray? {
         if (rect.size != 4) return null
-        val r = fitBounds(rect, screenW, screenH, minTop, bottomSafe, MIN_SIDE, scale)
+        val r = fitBounds(rect, screenW, screenH, minTop, bottomSafe, sideSafe, MIN_SIDE, scale)
         if (r[2] <= r[0] || r[3] <= r[1]) return null
         return r
     }

@@ -256,6 +256,13 @@ object MiuiFreeformRecordHook {
     private const val RESIZE_COORD_TOL = 8
 
     /**
+     * ★ fix170：**没有触摸证据**时，尺寸要变这么多才算「用户拉伸」（见 [onResize] 的
+     * no-touch 分支）。系统重摆 / 输入法弹出偶尔也改尺寸，但幅度小；用户拖缩放把手
+     * 必是几十像素级的跨度 —— 用大阈值把两类隔开。
+     */
+    private const val RESIZE_SIZE_TOL_NO_TOUCH = 32
+
+    /**
      * ★ fix90：**用户没在摸屏幕**时的落盘延时。必须明显大于「按下手势条 → 窗口退出
      * freeform」这段间隔（真机几十毫秒），关窗信号才来得及把系统帧掐掉；又不能太大，
      * 否则监听万一失灵时用户拖动的位置要等太久才记上。
@@ -353,8 +360,142 @@ object MiuiFreeformRecordHook {
         //   接管了手势条 DOWN/UP 的检测。留着只会在 system_server 启动时白扫一遍类名。
         // ★ fix79：记忆统一一份 —— 启动时把旧 SB 记忆并入主文件（写线程上跑，与后续写盘串行）。
         writeHandler.post { migrateSbMemory() }
+        // ★ fix172：freeformScale 记录 + 恢复（大小真身在渲染缩放层，见 installScaleSites）。
+        installScaleSites(lpparam)
         startFlusher()
         log("installed record hook: ${stats.values.count { it.inst > 0 }}/${SITES.size} sites")
+    }
+
+    // ------------------------------------------------ ★ fix172：freeformScale 记录 + 恢复
+
+    /**
+     * ★ fix172：**「大小」的真身是 freeformScale，不是 bounds** —— 真机实证：
+     *  - SurfaceFlinger `toDisplayTransform={ scale x=0.4731 y=0.4731 tx=125 ty=582 }`，
+     *    而 Task bounds 纹丝不动（用户按住拖 6.4 秒，bounds 一像素没变）；
+     *  - `dumpsys activity` Task dump 有 `activityOptionsInjector={freeformScale: 0.7898}`。
+     * 拖边角改的是 task surface 的渲染缩放（[LAYER_SCALE]=0.70 就是它的默认档），
+     * 所以 fix169/170 折腾 bounds 记录永远够不着「大小」。
+     *
+     * 实现走上游已验证的路（HyperCeiler `StickyFloatingWindows`，2026-09-28 在线取证）：
+     *  - **记录**：`ActivityTaskManagerService.resizeTask(taskId, rect)`（用户拖缩放时系统调
+     *    这里）before —— `mMiuiFreeFormManagerService.getMiuiFreeFormActivityStack(taskId)
+     *    .getFreeFormScale()` 读新缩放值，写 [HookContract.WINDOW_SCALE_PATH]；
+     *  - **恢复**：`ActivityStarterInjector.modifyLaunchActivityOptionIfNeed` after —— 仅当
+     *    本次启动**本来就是 freeform**（launchWindowingMode==5）且该包有 scale 记忆时，
+     *    `ActivityOptionsInjector.setFreeformScale` 注入记忆值。绝不把全屏启动改成小窗。
+     *
+     * 两端都受「记住小窗大小」开关（[HookContract.rememberSizeEnabled]，fix142 默认关）管。
+     */
+    private fun installScaleSites(lpparam: XC_LoadPackage.LoadPackageParam) {
+        // ---- 记录：ATMS.resizeTask ----
+        runCatching {
+            val atms = XposedHelpers.findClass(
+                "com.android.server.wm.ActivityTaskManagerService", lpparam.classLoader)
+            val stat = stats.getOrPut("ATMS.resizeTask") { Stat() }
+            for (m in locateByName(atms, "resizeTask")) {
+                runCatching { m.isAccessible = true }
+                runCatching {
+                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            stat.calls.incrementAndGet()
+                            runCatching { onSystemResizeTask(stat, param) }
+                        }
+                    })
+                    stat.inst++
+                }.onFailure { log("ATMS.resizeTask: hook failed ${it.message}") }
+            }
+        }.onFailure { log("ATMS.resizeTask: class not found") }
+
+        // ---- 恢复：MiuiFreeFormManagerService.onStartActivity（HyperOS 3 实际入口）----
+        // ★ 老入口 ActivityStarterInjector.modifyLaunchActivityOptionIfNeed 在本机已不存在
+        //   （该类只剩 startActivityUncheckedBefore，inst=0，已 dump .wm2 确认）。
+        //   现走 MiFreeFormX 实证的同代入口：args[0]=Task、args[1]=ActivityOptions，
+        //   只在小窗启动路径触发，直接改 options 的 freeformScale。
+        runCatching {
+            val cls = XposedHelpers.findClass(
+                "com.android.server.wm.MiuiFreeFormManagerService", lpparam.classLoader)
+            val stat = stats.getOrPut("MFFS.onStartActivity") { Stat() }
+            for (m in locateByName(cls, "onStartActivity")) {
+                runCatching { m.isAccessible = true }
+                runCatching {
+                    XposedBridge.hookMethod(m, object : XC_MethodHook() {
+                        override fun beforeHookedMethod(param: MethodHookParam) {
+                            stat.calls.incrementAndGet()
+                            runCatching { onMFFSStartActivity(stat, param) }
+                        }
+                    })
+                    stat.inst++
+                }.onFailure { log("MFFS.onStartActivity: hook failed ${it.message}") }
+            }
+            if ((stats["MFFS.onStartActivity"]?.inst ?: 0) == 0)
+                log("MFFS.onStartActivity: no method onStartActivity")
+        }.onFailure { log("MFFS.onStartActivity: class not found") }
+    }
+
+    /** fix172：resizeTask 帧内的 scale 写节流（同键同值不重复写盘）。 */
+    private val lastScaleWritten = ConcurrentHashMap<String, Float>()
+
+    /** ★ fix172：记录端 —— 用户拖缩放（或我们 am task resize）触发系统 `resizeTask`。 */
+    private fun onSystemResizeTask(stat: Stat, param: XC_MethodHook.MethodHookParam) {
+        val args = param.args
+        if (args.size < 2) { stat.skip = "args"; return }
+        val taskId = args[0] as? Int ?: run { stat.skip = "no-taskId"; return }
+        val rect = args[1] as? Rect ?: run { stat.skip = "no-rect"; return }
+        val stack = runCatching {
+            val svc = XposedHelpers.getObjectField(param.thisObject, "mMiuiFreeFormManagerService")
+            XposedHelpers.callMethod(svc, "getMiuiFreeFormActivityStack", taskId)
+        }.getOrNull() ?: run { stat.skip = "no-stack"; return }
+        val pkg = runCatching { XposedHelpers.callMethod(stack, "getStackPackageName") as? String }
+            .getOrNull() ?: run { stat.skip = "no-pkg"; return }
+        val scale = runCatching { XposedHelpers.callMethod(stack, "getFreeFormScale") as? Float }
+            .getOrNull() ?: run { stat.skip = "no-scale"; return }
+        if (scale !in 0.05f..2.0f) { stat.skip = "absurd($scale)"; return }
+        val sz = readDisplaySize()
+        val land = sz != null && sz[0] > sz[1]
+        val key = HookContract.memoryKey(pkg, land)
+        val prev = lastScaleWritten[key] ?: HookContract.readWindowScale(pkg, land)
+        if (prev != null && kotlin.math.abs(prev - scale) < 0.005f) {
+            stat.skip = "same"
+            return
+        }
+        // 「记住小窗大小」关 = 不记缩放（位置照旧由 bounds 链路负责）
+        if (!HookContract.rememberSizeEnabled()) { stat.skip = "flag-off"; return }
+        lastScaleWritten[key] = scale
+        stat.applied.incrementAndGet()
+        probeMark("RESIZE-TASK pkg=$pkg scale=$scale rect=${rect.left},${rect.top},${rect.right},${rect.bottom}")
+        log("缩放记忆 $pkg -> $scale（bounds 不变，缩放即大小）")
+        writeHandler.post { HookContract.writeWindowScale(pkg, land, scale) }
+    }
+
+    /** ★ fix172：恢复端 —— 小窗启动（MiuiFreeFormManagerService.onStartActivity）时注入记忆缩放。 */
+    private fun onMFFSStartActivity(stat: Stat, param: XC_MethodHook.MethodHookParam) {
+        val options = param.args.getOrNull(1) ?: run { stat.skip = "no-opts"; return }
+        val mode = runCatching {
+            XposedHelpers.callMethod(options, "getLaunchWindowingMode") as? Int
+        }.getOrNull()
+        if (mode != 5) { stat.skip = "not-freeform($mode)"; return }
+        if (!HookContract.rememberSizeEnabled()) { stat.skip = "flag-off"; return }
+        val pkg = param.args.getOrNull(0)?.let { pkgOfTask(it) }
+            ?: run { stat.skip = "no-pkg"; return }
+        val sz = readDisplaySize()
+        val land = sz != null && sz[0] > sz[1]
+        val scale = HookContract.readWindowScale(pkg, land)
+            ?: run { stat.skip = "no-scale-mem"; return }
+        val ok = runCatching {
+            val injector = XposedHelpers.callMethod(options, "getActivityOptionsInjector")
+            runCatching { XposedHelpers.callMethod(injector, "setFreeformScale", scale) }
+                .onFailure { first ->
+                    val f = injector.javaClass.declaredFields.firstOrNull { it.name == "mFreeformScale" }
+                    if (f != null) {
+                        f.isAccessible = true
+                        f.setFloat(injector, scale)
+                    } else throw first
+                }
+        }.isSuccess
+        stat.applied.incrementAndGet()
+        probeMark("MFFS-START pkg=$pkg applyScale=$scale ok=$ok")
+        if (ok) log("恢复小窗缩放 $pkg -> $scale")
+        else stat.skip = "injector-fail"
     }
 
     // ------------------------------------------------ MIUI 手势类探针 + 触摸管道（fix78e）
@@ -471,10 +612,36 @@ object MiuiFreeformRecordHook {
         //   默认几何，关窗 flush 把它当「用户位置」记进 SB → 下次重开位置乱跳（用户报
         //   "侧边栏工具箱小窗记忆没用"）。切断 setBounds 写入后，侧边栏窗「没拖就关」时 latest
         //   为空 → 关窗 flush 什么都不记（正确：用户没动，本就不该记系统默认值）。
+        // ★★ fix175b：**拖动期间的实时落盘必须放在尺寸类回调块之前**。
+        //   原实现把这段放在 475 那个 `onResize/setBounds/resize` 块**之后**，而那个块的
+        //   所有分支（size-write / size-write-no-touch / skip-write）**一律以 return 收尾**。
+        //   真机实证：拖边角改大小时系统发的正是 `setBounds`/`onResize`（探针里成簇出现
+        //   的 `setBounds(skip)`），于是这些帧在块里就 return 了，**永远够不到下面那段
+        //   bar-drag 实时写** —— 这正是用户指出的「拖动的时候没有实时记录」。
+        //   现在：只要在拖（barFlags 命中），不管回调叫什么名字，一律实时落盘。
+        barFlags[pkg]?.let { ts ->
+            if (System.currentTimeMillis() - ts > BAR_FLAG_TIMEOUT_MS) {
+                barFlags.remove(pkg) // 保险丝：UP 丢了最多拦 15s，超时自愈
+                barSnapshot.remove(pkg)
+            } else {
+                latest[stableKeyFor(r)] = pkg to Rect(b)
+                stat.skip = "bar-drag"
+                lastPkg = pkg
+                lastRect = "${b.left},${b.top},${b.right},${b.bottom}"
+                val fsDrag = freeformScaleOf(task)
+                probeMoved(b, "bar-drag(前置) write fs=$fsDrag", task)
+                // ★ fix175：缩放是干净的连续量，实时记，不等抬手判定
+                maybeRecordScale(pkg, stableKeyFor(r), land, fsDrag, "bar-drag")
+                scheduleWrite(stableKeyFor(r), pkg, b, Src.MOVE)
+                return
+            }
+        }
         val methodName = (param.method as? java.lang.reflect.Method)?.name
         if (methodName == "onResize" || methodName == "setBounds" || methodName == "resize") {
             lastPkg = pkg
             lastRect = "${b.left},${b.top},${b.right},${b.bottom}"
+            // ★ fix171：每帧顺手读 freeformScale（拖边角改的就是它），打探针看它跟哪个回调同步。
+            val fs = freeformScaleOf(task)
             // ★ fix124：出生帧上学「系统默认几何」（只在 onResize/setBounds 上学，
             //   Task.resize 是我们 am task resize 的通道，绝不能学）。
             if (isFirstSeen && methodName != "resize") {
@@ -503,19 +670,65 @@ object MiuiFreeformRecordHook {
                 abs(baseSize.first - w) > RESIZE_COORD_TOL ||
                     abs(baseSize.second - h) > RESIZE_COORD_TOL
                 )
+            val sizeChangedBig = baseSize != null && (
+                abs(baseSize.first - w) > RESIZE_SIZE_TOL_NO_TOUCH ||
+                    abs(baseSize.second - h) > RESIZE_SIZE_TOL_NO_TOUCH
+                )
             // ★ 必须有触摸：系统自己摆窗 / 侧边栏 / banner 展开时尺寸也可能和记忆不同，
             //   但那一刻用户没摸屏幕；只有"用户在摸"才是真拉伸（拖缩放把手）。
             val touched = isTouched(pkg, 2_000L)
+            // ★ fix174：尺寸类回调帧里也顺手记缩放（拖缩放不总走 bar-drag，setBounds/onResize
+            //   这一族同样会跟着缩放一起刷新）。有触摸证据 + 不在出生安静期才认。
+            val seenAt0 = freeformSeen[pkg]?.at ?: 0L
+            // ★ fix175 去掉触摸证据 → fix178 改回：缩放写盘仍要求 isTouched。
+            //   原因（真机实证）：冷开入场动画在出生安静期之后还会发 setBounds/onResize 帧，
+            //   此时 freeformScaleOf 读到的是动画中间帧（如 0.25）而非用户值，无触摸守卫
+            //   就会把记忆污染成错误值（calculator 0.5833 → 0.25）。缩放虽是「只有用户拖才
+            //   变」的连续量，但**冷开动画帧也会改它**，所以仍须用触摸证据区分。
+            //   拖动时 bar-drag 块 / onMovedByResize 帧都带 touched，三处一致记，不漏。
+            if (touched && !fs.isNaN() && System.currentTimeMillis() - seenAt0 >= BIRTH_QUIET_MS) {
+                maybeRecordScale(pkg, key0, land, fs, methodName)
+            }
+            // ★ fix170：出生安静期内不放行（与 [onMovedByResize] 的 fix92 同口径）。侧边栏 /
+            //   系统入口开窗时，出生几何（系统默认）与记忆里用户拉过的尺寸差通常远超
+            //   [RESIZE_SIZE_TOL_NO_TOUCH]，没有这道闸门就会被当成"用户拉伸"写回去 ——
+            //   正好是"重开大小又变回默认"的现象本身。
+            val seenAt = freeformSeen[pkg]?.at ?: 0L
+            val birthQuiet = System.currentTimeMillis() - seenAt < BIRTH_QUIET_MS
             if (!corner && w > 0 && h > 0 && sizeChanged && touched) {
                 scheduleWrite(key0, pkg, b, Src.RESIZE, DEBOUNCE_MS)
                 stat.skip = "$methodName(size-write ${w}x$h)"
-                probeMoved(b, "$methodName size-write ${w}x$h", task)
+                probeMoved(b, "$methodName size-write ${w}x$h fs=$fs", task)
+                return
+            }
+            // ★★ fix170：**尺寸类回调的取证盲区 + 无触摸放行**。
+            //   ① 盲区：`Task.setBounds` 是本 ROM 上调用最密的一个点（`calls=181`，远超
+            //      onResize 的 28），可此前**只有 `onResize` 才写探针** —— 用户拉伸若走
+            //      setBounds，尺寸变了我们连证据都看不到，只能看到"记忆里尺寸永远没动"。
+            //      这里把三个尺寸类回调的帧连同**判定入参**全留下痕（基准 / 变没变 /
+            //      是否在摸），下一次复现就能定死到底是哪条链路掉了尺寸。
+            //   ② 放行：第 509 行要求 [isTouched]（"用户在摸"），而它由 pointer DOWN
+            //      **恰好抓到活窗**才刷新 —— 真机上这条链路不总成立（探针里成群的
+            //      `BAR-DOWN seen=` 空行就是没能刷新的那些 DOWN）。一旦失灵，用户拖出来的
+            //      尺寸会被永久拒收 ⇒ "拖动改了大小，重开还是老大小"。补一条受控通道：
+            //      几何本身合理（非失焦角 / 不在出生安静期 / 幅度够大）就**先认为它是用户
+            //      拉的**；坐标仍由 [doWrite] 的 fix80 保护 —— 此刻没有触摸证据 ⇒ 沿用旧坐标、
+            //      **只更新尺寸**，不会把把关窗重摆的位置带进来。
+            if (!corner && !birthQuiet && w > 0 && h > 0 && sizeChangedBig) {
+                scheduleWrite(key0, pkg, b, Src.RESIZE, DEBOUNCE_MS)
+                stat.skip = "$methodName(size-write-no-touch ${w}x$h)"
+                probeMoved(b, "$methodName SIZE-WRITE(no-touch) ${w}x$h fs=$fs " +
+                    "base=${baseSize?.first}x${baseSize?.second}", task)
+                log("无触摸证据但尺寸大幅变化 $pkg：${w}x$h " +
+                    "← ${baseSize?.first}x${baseSize?.second}，按用户拉伸记录尺寸")
                 return
             }
             stat.skip = "$methodName(skip-write)"
             // ★ fix77 探针：onResize 与 onMovedByResize 是同一帧重摆的两个回调，
             //   序列对照能看出「关闭动效」到底先走哪个、几何怎么漂。
-            if (methodName == "onResize") probeMoved(b, "onResize(skip-write)", task)
+            //   ★ fix170：三个尺寸类回调**全都**打，别只打 onResize（漏掉 setBounds 这一族）。
+            probeMoved(b, "$methodName(skip) szChg=$sizeChanged big=$sizeChangedBig " +
+                "touch=$touched base=${baseSize?.first}x${baseSize?.second} fs=$fs", task)
             return
         }
         // ★ fix77：`onMovedByResize` 混了「系统关闭动效重摆」。fix76b 用 isOnTop 过滤
@@ -535,7 +748,12 @@ object MiuiFreeformRecordHook {
             val animating = boolOf(task, "isAnimating")
             val onTop = boolOf(task, "isOnTop")
             val corner = b.left in 20..60 && b.top in 100..160
-            probeMoved(b, "corner=$corner vis=$visible anim=$animating top=$onTop", task)
+            val fsMove = freeformScaleOf(task)
+            val touchedM = isTouched(pkg, 2_000L)
+            probeMoved(b, "corner=$corner vis=$visible anim=$animating top=$onTop fs=$fsMove touch=$touchedM", task)
+            // ★ fix175→fix178：缩放只在用户拖动（有触摸证据）时记，避免冷开入场动画帧污染记忆。
+            //   此分支在出生安静期过滤（下文的 birth-anim drop）之前执行，必须自有触摸守卫。
+            if (!corner && touchedM) maybeRecordScale(pkg, stableKeyFor(r), land, fsMove, "onMovedByResize")
             if (corner) {
                 stat.skip = "onMovedByResize(lost-focus-corner ${b.left},${b.top})"
                 lastPkg = pkg
@@ -564,20 +782,8 @@ object MiuiFreeformRecordHook {
         //   「resize 改坐标」判成无效数据、fix78i 又能在判成「关闭」时用按下快照覆盖自愈，
         //   于是拖动帧可以放心即时写（debounce 80ms 合并连帧）——松手即生效，手感跟手得多。
         //   同时仍更新 `latest`，供 UP 判定与关闭自愈使用。
-        barFlags[pkg]?.let { ts ->
-            if (System.currentTimeMillis() - ts > BAR_FLAG_TIMEOUT_MS) {
-                barFlags.remove(pkg) // 保险丝：UP 丢了最多拦 15s，超时自愈
-                barSnapshot.remove(pkg)
-            } else {
-                latest[stableKeyFor(r)] = pkg to Rect(b)
-                stat.skip = "bar-drag"
-                lastPkg = pkg
-                lastRect = "${b.left},${b.top},${b.right},${b.bottom}"
-                probeMoved(b, "bar-drag write", task)
-                scheduleWrite(stableKeyFor(r), pkg, b, Src.MOVE)
-                return
-            }
-        }
+        //   ★ fix175b：这段**已上移到尺寸类回调块之前**（见那里）——拖缩放时系统发的是
+        //   `setBounds`/`onResize`，而那个块所有分支都 return，放在这里等于永远不执行。
         // ★ fix78g/h：UP 后待判期（barRecent）—— 动效/惯性帧**继续只缓冲不落盘**
         //   （旧版 UP 即清标记，动效帧绕过拦截直接落盘 = "没移动小窗、重开位置却变了"）。
         //   fix78h：flush 终帧后 barRecent 也**不清**，留到 remove（慢关闭自愈）或 4s 超时。
@@ -969,25 +1175,38 @@ object MiuiFreeformRecordHook {
         val mode = runCatching { XposedHelpers.callMethod(s.task, "getWindowingMode") as? Int }
             .getOrNull()
         val alive = mode == null || mode == FREEFORM_MODE // 读不到就按"活着"保守处理
-        probeMark("BAR-UP 采样#$attempt pkg=$pkg mode=$mode alive=$alive")
+        // ★ fix168b：mode 在「拖拽释放 / 关闭动效」瞬间会抖动成非 freeform（真机实证：松手采样
+        //   就读到 mode=1），单凭它判「关闭」会把**正常移动/缩放**误判成关闭 →
+        //   writeSnapshotAsClose 用按下快照覆盖 → 记忆的位置/尺寸全丢（用户报「没有记忆大小/位置」的真凶）。
+        //   加 isVisible 作二次判据：窗口仍可见 = 一定没真关 → 按移动 flush 终帧，绝不回滚快照。
+        //   只有 mode≠freeform **且** isVisible=false（澎湃关小窗 = mode→fullscreen + 隐藏）才是真关闭。
+        val visible = boolOf(s.task, "isVisible") ?: true
+        val reallyClosed = !alive && !visible
+        probeMark("BAR-UP 采样#$attempt pkg=$pkg mode=$mode alive=$alive vis=$visible")
         if (attempt == 0) {
-            if (!alive) {
-                // ★ fix80b：**当场覆盖**。拖动期已即时落盘（fix80b），采样到 mode≠freeform
-                //   = 关闭 → 必须**立刻**用按下快照盖掉刚写进去的跟指帧，不能等 #1：
-                //   等 #1 的话中间任何一次新手势都会把判定令牌作废，跟指帧就永久残留了。
-                //   万一误判（其实只是失焦）代价也小：写的是"手势前位置"，不会乱跳。
-                writeSnapshotAsClose(pkg)
+            if (!reallyClosed) {
+                flushTerminalAsMove(pkg) // 移动/缩放：兜底再落一次终帧（含新尺寸）
+                writeHandler.postDelayed(
+                    { barUpJudge(pkg, upTs, 1, alive) }, BAR_UP_RECHECK_DELAY_MS
+                )
                 return
             }
-            flushTerminalAsMove(pkg) // 移动：兜底再落一次终帧
-            writeHandler.postDelayed(
-                { barUpJudge(pkg, upTs, 1, alive) }, BAR_UP_RECHECK_DELAY_MS
-            )
+            // ★ fix80b：**当场覆盖**。拖动期已即时落盘（fix80b），采样到 mode≠freeform
+            //   = 关闭 → 必须**立刻**用按下快照盖掉刚写进去的跟指帧，不能等 #1：
+            //   等 #1 的话中间任何一次新手势都会把判定令牌作废，跟指帧就永久残留了。
+            //   万一误判（其实只是失焦）代价也小：写的是"手势前位置"，不会乱跳。
+            writeSnapshotAsClose(pkg)
             return
         }
         // 第二次采样：下最终结论
-        if (!alive) {
-            writeSnapshotAsClose(pkg) // 关闭（含"#0 判活、#1 才退 freeform"的慢关闭自愈）
+        if (!reallyClosed) {
+            // ★ fix169：这时窗口早已摆定（比 #0 又晚了一个 RECHECK 周期），再按**实时几何**
+            //   落一次 —— 用户在这一次手势里拉出来的新尺寸必须进记忆，否则下次重开又变回去。
+            //   位置 + 大小一并写（Src.MOVE 不走 fix80 的「沿用旧坐标」保护）。
+            flushTerminalAsMove(pkg)
+            barRecent.remove(pkg)
+            barSnapshot.remove(pkg)
+            probeMark("BAR-UP 结论=移动 pkg=$pkg")
             return
         }
         if (!firstAlive) {
@@ -999,21 +1218,40 @@ object MiuiFreeformRecordHook {
             probeMark("BAR-UP 结论=关闭后重开(不写) pkg=$pkg")
             return
         }
-        barRecent.remove(pkg)
-        barSnapshot.remove(pkg)
-        probeMark("BAR-UP 结论=移动 pkg=$pkg")
+        writeSnapshotAsClose(pkg) // 关闭（含"#0 判活、#1 才退 freeform"的慢关闭自愈）
     }
 
-    /** 「移动」落盘：flush 缓冲里的最后一帧（系统实际摆定后的几何）。 */
+    /**
+     * 「移动 / 缩放」落盘：**读窗口当前真实几何**，读不到才退回缓冲的最后一帧。
+     *
+     * ★ fix169：为什么改成读真值 —— 记忆文件里所有 App 的宽高**常年一模一样**
+     * （竖屏清一色 1080x1728、横屏 1080x1388），只有坐标在变。
+     *
+     * 真机自检把原因钉死了：唯一能写盘的是 `onMovedByResize`（Src.MOVE），而
+     * `Task.resize` 零调用、`setBounds`/`onResize` 被策略性 skip-write ⇒
+     * **MIUI 缩放把手那条回调链我们看不到**，拉伸帧从来没进过 `latest`。于是 buffer
+     * 里那份永远是「系统摆的默认几何」，位置靠拖动能更新、大小却永远停在默认值。
+     *
+     * 手势本身是可靠的（全局 pointer 监听已注册），所以褪手判定为「窗还活着」时，
+     * 直接读 task 当前 bounds —— 不论澎湃内部用哪个回调改的尺寸，最终几何一定在
+     * 这里，位置与大小一并落下。`latest` 只作为读不到时的兜底。
+     */
     private fun flushTerminalAsMove(pkg: String) {
         val route = routeOf[pkg] ?: return
         val key = stableKeyFor(route)
-        latest[key]?.let {
-            flushNow(key, pkg, Rect(it.second), route)
-            probeMark("BAR-UP flush(移动) pkg=$pkg " +
-                "记=${it.second.left},${it.second.top},${it.second.right},${it.second.bottom}")
-            log("手势条抬起 $pkg：窗仍 freeform，按移动落盘 ${it.second}")
+        val live = freeformSeen[pkg]?.let { runCatching { boundsOf(it.task) }.getOrNull() }
+        val src2 = live ?: latest[key]?.second
+        if (src2 == null) {
+            probeMark("BAR-UP flush(移动) pkg=$pkg 无几何可用（不写）")
+            return
         }
+        val rect = Rect(src2)
+        flushNow(key, pkg, rect, route)
+        probeMark("BAR-UP flush(移动·${if (live != null) "实时" else "缓冲"}) pkg=$pkg " +
+            "记=${rect.left},${rect.top},${rect.right},${rect.bottom} " +
+            "尺寸=${rect.width()}x${rect.height()}")
+        log("手势条抬起 $pkg：窗仍 freeform，按移动落盘 " +
+            "${rect.left},${rect.top},${rect.right},${rect.bottom}（${rect.width()}x${rect.height()}）")
     }
 
     /**
@@ -1042,17 +1280,27 @@ object MiuiFreeformRecordHook {
         //   窗没事 —— 快照=我们下发的位置，写了等于幂等。
         //   只有三种可信情况才写：① 本轮用户真拖过（onMovedByResize 出现过）；
         //   ② 快照≈记忆原值（写了也不改变现状，幂等）；③ 是我们 App 开的窗（会话文件命中）。
-        if (!trusted && !snapMatchesMemory(route, snap) && !isOursSession(pkg)) {
+        // ★ fix168：关闭自愈**只回滚坐标、保留尺寸**。拖右下角缩放把手拉伸时，拖动期间
+        //   （bar-drag → scheduleWrite MOVE）已即时把「拉伸后的新尺寸」落盘；这里若原样写
+        //   「按下快照」（拉伸前的旧尺寸），会把刚记下的新尺寸覆盖掉，表现为「拉伸后关窗 →
+        //   重开又变回原大小」（用户报的「没有记忆大小」）。坐标仍回滚到手势前停稳位置
+        //   （防关闭动效帧污染位置），尺寸沿用最近一次落盘值（lastSize，无则退回记忆尺寸）。
+        val mem = readMemoryRect(route.first, route.second)
+        val outSize = lastSize[key] ?: mem?.let { it.width() to it.height() }
+        val outRect = if (outSize != null)
+            Rect(snap.left, snap.top, snap.left + outSize.first, snap.top + outSize.second)
+        else snap
+        if (!trusted && !snapMatchesMemory(route, outRect) && !isOursSession(pkg)) {
             probeMark("BAR-UP 结论=关闭(系统窗未动·不写) pkg=$pkg " +
-                "拒=${snap.left},${snap.top},${snap.right},${snap.bottom}")
-            log("手势关闭 $pkg：系统开的窗且用户没拖过，丢弃系统默认快照，保留原记忆")
+                "拒=${outRect.left},${outRect.top},${outRect.right},${outRect.bottom}")
+            log("手势关闭 $pkg：系统开的窗且用户没拖过，丢弃默认快照，保留原记忆")
             return
         }
-        flushNow(key, pkg, Rect(snap), route)
-        probeMark("BAR-UP 结论=关闭 写按下快照 pkg=$pkg " +
-            "记=${snap.left},${snap.top},${snap.right},${snap.bottom}")
-        log("手势关闭 $pkg：窗已退 freeform，记手势前停稳位置 " +
-            "${snap.left},${snap.top},${snap.right},${snap.bottom}，跟指帧全部丢弃")
+        flushNow(key, pkg, outRect, route)
+        probeMark("BAR-UP 结论=关闭 写按下快照(仅坐标) pkg=$pkg " +
+            "记=${outRect.left},${outRect.top},${outRect.right},${outRect.bottom}")
+        log("手势关闭 $pkg：窗已退 freeform，记手势前位置 " +
+            "${outRect.left},${outRect.top} + 保留尺寸 ${outRect.width()}x${outRect.height()}，跟指帧全部丢弃")
     }
 
     /** ★ fix89：快照是否与记忆原值一致（±8px）—— 一致则写=幂等，无害放行。 */
@@ -1116,8 +1364,13 @@ object MiuiFreeformRecordHook {
      * @param src   写入来源（[Src.MOVE] 移动 / [Src.RESIZE] 尺寸类），决定要不要走 fix80 的坐标保护。
      */
     private fun doWrite(
-        pkg: String, rect: Rect, route: Pair<String, String>? = null, src: Src = Src.MOVE
+        pkg: String, rectIn: Rect, route: Pair<String, String>? = null, src: Src = Src.MOVE
     ) {
+        // ★ fix176 方案已撤回：曾在落盘时把渲染缩放折算进 bounds，结果**拖动过程中**记忆
+        //   被实时改写，而 App 侧的 resize 复核会立刻把它应用到窗口上 ⇒ 窗口被反复 resize
+        //   （用户报「拖动的过程中 bounds 又变成下发前的 bounds」）。记忆仍存真实 bounds，
+        //   缩放单独记在 [HookContract.WINDOW_SCALE_PATH]，恢复时注入。
+        val rect = rectIn
         val w = rect.right - rect.left
         val h = rect.bottom - rect.top
         if (w < MIN_SIDE || h < MIN_SIDE) return
@@ -1129,6 +1382,10 @@ object MiuiFreeformRecordHook {
         val maxRight = size?.get(0) ?: 0
         val maxBottom = size?.get(1) ?: 0
         val topSafe = if (size != null && size[0] > size[1]) statusBarHeightSystem() else 0
+        // ★ fix177：收边按**实际渲染缩放**（记忆里的 freeformScale），不再恒用 0.70 ——
+        //   否则"拉小的窗"被当成满屏宽、位置被强行吸到左边缘（与出生钩子 / App 侧同口径）。
+        val fs = HookContract.effectiveScale(pkg, size != null && size[0] > size[1])
+        val sideSafe = WindowSizing.sideSafeSystemPx()
         // ★ fix164：收边逻辑统一走 [WindowSizing.fitBounds]（与出生钩子同口径）：
         //   **尺寸 + 位置一起收**，而不是只平移位置。
         val out: Rect
@@ -1173,8 +1430,8 @@ object MiuiFreeformRecordHook {
             //   出现"一开出来手势条就在状态栏上"。竖屏不动（屏高富余，且改了会影响
             //   习惯了顶天立地大窗的摆法）。
             val fitted = WindowSizing.clampRect(
-                intArrayOf(rect.left, rect.top, rect.right, rect.bottom), maxRight, maxBottom, topSafe, LAYER_SCALE,
-                bottomSafe = WindowSizing.GESTURE_BOTTOM_GAP
+                intArrayOf(rect.left, rect.top, rect.right, rect.bottom), maxRight, maxBottom, topSafe, fs,
+                bottomSafe = WindowSizing.GESTURE_BOTTOM_GAP, sideSafe = sideSafe
             )
             out = if (fitted != null) Rect(fitted[0], fitted[1], fitted[2], fitted[3]) else rect
             lastSkip = if (out != rect)
@@ -1216,8 +1473,8 @@ object MiuiFreeformRecordHook {
                 if (size != null) {
                     val f2 = WindowSizing.clampRect(
                         intArrayOf(out2.left, out2.top, out2.right, out2.bottom),
-                        maxRight, maxBottom, topSafe, LAYER_SCALE,
-                        bottomSafe = WindowSizing.GESTURE_BOTTOM_GAP
+                        maxRight, maxBottom, topSafe, fs,
+                        bottomSafe = WindowSizing.GESTURE_BOTTOM_GAP, sideSafe = sideSafe
                     )
                     f2?.let {
                         if (it[2] != out2.right || it[3] != out2.bottom) {
@@ -1364,6 +1621,107 @@ object MiuiFreeformRecordHook {
         runCatching { f.setReadable(true, false) }
     }
 
+    // ---------------------------------------------------------------- ★ fix171：freeformScale 取证
+    /**
+     * ★ fix171：MIUI 自由小窗「大小」的真身 —— 拖边角改的不是 [Task.getBounds]，是
+     * task surface 的渲染缩放。dumpsys 实证（2026-09-28 真机）：
+     *   - SurfaceFlinger：`toDisplayTransform={ scale x=0.4731 y=0.4731 tx=125 ty=582 }`
+     *   - `dumpsys activity`：`activityOptionsInjector={freeformScale: 0.78981483 mIsNormalFreeForm: true}`
+     * （0.4731 ≈ 0.7898 × 显示系数 ~0.6；我们常驻的 [LAYER_SCALE]=0.70 就是这个 scale 的默认档）
+     * 而 Task bounds 全程纹丝不动 ⇒ 只记 bounds 的链路天然看不到「大小」变化 ——
+     * 这就是"拖动改了大小、重开还是老样子"的真正机制。
+     *
+     * 这里把 `Task.mOptions(ActivityOptions) → injector.freeformScale` 反射读出来随帧打探针：
+     * ① 确认用户拖动时 scale 走哪个回调更新、值怎么漂；② 为记录/恢复 scale 铺路。
+     * 字段路径各 ROM 可能不同：首次命中把路径打进探针，探索失败把候选字段结构 dump 进
+     * `.wm` 文件，别瞎猜。
+     */
+    private val scaleFieldRef = java.util.concurrent.atomic.AtomicReference<Array<java.lang.reflect.Field>?>()
+    private var scaleProbeDumped = false
+
+    /**
+     * ★ fix174：改走 **MiuiFreeFormActivityStack** —— fix171 猜的
+     * `Task.mOptions → injector.mFreeformScale` 在本 ROM 上读不到（探针全 `fs=NaN`）：
+     * Task 上根本没有 ActivityOptions 字段，options 只是**启动时**的入参，缩放的**活值**
+     * 由 MIUI 自己的 `MiuiFreeFormActivityStack` 持有（HyperCeiler 就是这么读的）。
+     * 路径：`Task.mAtmService` → `mMiuiFreeFormManagerService`
+     *      → `getMiuiFreeFormActivityStack(mTaskId)` → `getFreeFormScale()`。
+     * 全程缓存反射对象，每帧只读值；失败打一次探针，不刷屏。
+     */
+    /**
+     * ★ fix175：**跟手优化**。fix174 的写法每帧要做 5 次 `XposedHelpers` 反射查找
+     *   （`getObjectField`×2 + `getIntField` + `callMethod`×2），而拖动时**一帧会连走好几个
+     *   回调**（onResize 块、onMovedByResize 探针、bar-drag），开销全落在跟手指的帧上 ——
+     *   用户报「拖动改变大小后很慢才生效」。改为：
+     *   ① freeform 服务实例与两个 Method **只查一次并缓存**（进程内唯一）；
+     *   ② 同一 task 在 120ms 内复用上次读到的值（缩放是连续量，不必逐帧读）。
+     */
+    @Volatile private var cachedFfms: Any? = null
+    @Volatile private var mGetStack: java.lang.reflect.Method? = null
+    @Volatile private var mGetScale: java.lang.reflect.Method? = null
+    private val scaleCache = ConcurrentHashMap<Int, Pair<Long, Float>>()
+
+    private fun freeformScaleOf(task: Any): Float {
+        val taskId = runCatching { XposedHelpers.getIntField(task, "mTaskId") }.getOrNull()
+            ?: return Float.NaN
+        val now = System.currentTimeMillis()
+        scaleCache[taskId]?.let { (ts, v) -> if (now - ts < 120L) return v }
+        val v = runCatching {
+            var svc = cachedFfms
+            if (svc == null) {
+                val atms = runCatching { XposedHelpers.getObjectField(task, "mAtmService") }
+                    .getOrNull() ?: return@runCatching Float.NaN
+                svc = runCatching {
+                    XposedHelpers.getObjectField(atms, "mMiuiFreeFormManagerService")
+                }.getOrNull() ?: return@runCatching Float.NaN
+                cachedFfms = svc
+            }
+            var ms = mGetStack
+            if (ms == null) {
+                ms = svc.javaClass.getMethod(
+                    "getMiuiFreeFormActivityStack", Int::class.javaPrimitiveType)
+                mGetStack = ms
+            }
+            val stack = ms.invoke(svc, taskId) ?: return@runCatching Float.NaN
+            var mg = mGetScale
+            if (mg == null) { mg = stack.javaClass.getMethod("getFreeFormScale"); mGetScale = mg }
+            when (val r = mg.invoke(stack)) {
+                is Float -> if (r in 0.05f..2.0f) r else Float.NaN
+                is Number -> { val f = r.toFloat(); if (f in 0.05f..2.0f) f else Float.NaN }
+                else -> Float.NaN
+            }
+        }.getOrDefault(Float.NaN)
+        if (!v.isNaN()) scaleCache[taskId] = now to v
+        return v
+    }
+
+    /** ★ fix174：缩放记忆落盘（用户在拖 → 缩放真的变了才写，避免系统帧污染）。 */
+    private fun maybeRecordScale(pkg: String, key: String, landscape: Boolean, scale: Float, why: String) {
+        if (scale.isNaN() || scale !in 0.05f..2.0f) return
+        if (!HookContract.rememberSizeEnabled()) return
+        val prev = lastScaleWritten[key] ?: HookContract.readWindowScale(pkg, landscape)
+        if (prev != null && kotlin.math.abs(prev - scale) < 0.005f) return
+        lastScaleWritten[key] = scale
+        probeMark("SCALE-WRITE pkg=$pkg scale=$scale via=$why")
+        writeHandler.post { HookContract.writeWindowScale(pkg, landscape, scale) }
+    }
+
+    private fun dumpScaleProbe(cls: Class<*>, hit: String, extra: Class<*>?) {
+        if (scaleProbeDumped) return
+        scaleProbeDumped = true
+        runCatching {
+            val sb = StringBuilder("scale probe hit=$hit cls=${cls.name}\n")
+            for (m in cls.declaredFields) sb.append("${m.type.simpleName} ${m.name}\n")
+            extra?.let {
+                sb.append("--- ${it.name}\n")
+                for (m in it.declaredFields) sb.append("${m.type.simpleName} ${m.name}\n")
+            }
+            val f = File(HookContract.RECORD_STATE_PATH + ".wm")
+            f.writeText(sb.toString())
+            runCatching { f.setReadable(true, false) }
+        }
+    }
+
     private fun isFreeformTask(t: Any): Boolean {
         val m = runCatching { XposedHelpers.callMethod(t, "getWindowingMode") as? Int }.getOrNull()
         return m == FREEFORM_MODE
@@ -1505,6 +1863,9 @@ object MiuiFreeformRecordHook {
                     //   一直是 0 = 没抓到这类帧（正常）；涨得快说明系统重摆/缩放补偿在频繁污染。
                     sb.append("resize(coord-invalid=${resizeCoordInvalid.get()})\n")
                     for (s in SITES) sb.append("${s.label} ${stats[s.label] ?: Stat()}\n")
+                    // ★ fix172：scale 两个 hook 点（不在 SITES 里）也进自检。
+                    sb.append("ATMS.resizeTask ${stats["ATMS.resizeTask"] ?: Stat()}\n")
+                    sb.append("MFFS.onStartActivity ${stats["MFFS.onStartActivity"] ?: Stat()}\n")
                     val f = File(HookContract.RECORD_STATE_PATH)
                     val tmp = File(HookContract.RECORD_STATE_PATH + ".tmp")
                     tmp.writeText(sb.toString())

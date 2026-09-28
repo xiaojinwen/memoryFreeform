@@ -32,6 +32,22 @@
 - ★ 删方法铁律：先 grep 全仓确认零调用方再删；`tools/` 不参与编译。
 
 ## ★ 核心机制（真机定论，勿推翻）
+- ★★★ **小窗「大小」的真身是 `freeformScale`（渲染缩放），不是 Task bounds**（2026-09-28 定论）。
+  真机实证：用户按住拖小窗边角 **6.4 秒**，Task bounds 一像素没变，而 SurfaceFlinger
+  `toDisplayTransform={ scale x=0.4731 }`（默认档 0.70）——拖边角改的是 task surface 的缩放。
+  ⇒ **只记 bounds 的链路永远恢复不了"大小"**（fix169~fix171 全栽在这）。
+  - 读活值：`Task.mAtmService` → `mMiuiFreeFormManagerService` → `getMiuiFreeFormActivityStack(mTaskId)` → `getFreeFormScale()`
+  - 写/恢复：`ActivityOptions.getActivityOptionsInjector().setFreeformScale(scale)`（配 `setLaunchBounds`）
+  - 默认档 **0.70 = `WindowSizing.MIUI_LAYER_SCALE`**（同一个东西的两面）；dumpsys 快照里 `mFreeformScale=0.7` 是同源铁证
+  - 记忆文件 `/data/system/memoryfreeform_window_scale`（`pkg=0.45` / `pkg@L=`，按方向分键，与 bounds 同口径）
+  - ⚠ 两个「别照抄上游」的点（本 ROM 已实测）：
+    ① HyperCeiler 在 `ATMS.resizeTask` 里记缩放 —— **本 ROM 拖边角不走它**（只有 `am task resize` 走），
+       必须在 `onMovedByResize` / `bar-drag` 帧里读（fix174）；
+    ② HyperCeiler 用 `ActivityStarterInjector.modifyLaunchActivityOptionIfNeed` 恢复 —— 本 ROM 不经过，
+       改在我们已验证生效的 `BirthHook.applyToOptions()` 里注入（fix172b）。
+  - 上游参考代码已下载到 `.workbuddy/ref/upstream/`（HyperCeiler `StickyFloatingWindows.java`、
+    MiFreeFormX `SizeAndPositionHooker.kt` / `ActivityOptionsInjector.kt` / `MiuiFreeFormActivityStack.kt`）。
+    ⚠ 这推翻了 2026-09-27「上游没人处理过小窗记忆」的旧结论 —— 那次只查了**圆角**，没查**大小**。
 - ★★★ `Task.getBounds()`=逻辑屏坐标；图层缩放补偿 `WindowSizing.MIUI_LAYER_SCALE`=`0.70`（下发尺寸÷0.70）。
   探针 `getScale()` 返回 1.0 是**假信号**（fix105 信它改 1.0、fix109 已平反）——别再推翻。
 - ★★★ 清记忆断根三步（缺一步就白清）：删记忆文件 → `am stack remove` 清残留 task → 再删文件 + 重启。

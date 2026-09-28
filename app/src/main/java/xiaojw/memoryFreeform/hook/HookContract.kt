@@ -1,6 +1,7 @@
 package xiaojw.memoryFreeform.hook
 
 import java.io.File
+import xiaojw.memoryFreeform.core.WindowSizing
 
 /**
  * App 侧与注入到 system_server 的 hook 代码之间的约定。
@@ -148,6 +149,76 @@ object HookContract {
     // fix128：rememberSizeEnabled 的文件缓存（birth 链路热）。
     private var flagAt = 0L
     private var flagRaw = ""
+
+    /**
+     * ★ fix172：**小窗缩放记忆**（hook 写 hook 读，App 不参与）。行格式：
+     * ```
+     * pkg=0.4731        竖屏
+     * pkg@L=0.4731      横屏
+     * ```
+     * 「大小」的真身：真机实证拖边角改的是 **task surface 渲染缩放**（SurfaceFlinger
+     * `toDisplayTransform scale x=0.4731`，`dumpsys activity` 的
+     * `activityOptionsInjector={freeformScale: 0.7898}`），而 **Task bounds 全程不动** ——
+     * 只记 bounds 的链路天然看不见「大小」变化（fix169~fix171 折腾的就是这个）。
+     * 记录：`ATMS.resizeTask` 时读 `MiuiFreeFormActivityStack.getFreeFormScale()`；
+     * 恢复：`ActivityStarterInjector.modifyLaunchActivityOptionIfNeed`（仅 freeform 启动）
+     * 经 `ActivityOptionsInjector.setFreeformScale` 注入。
+     * 缩放的默认档 0.70 = [WindowSizing.MIUI_LAYER_SCALE]，dumpsys 快照里的 `mFreeformScale=0.7`
+     * 是同源铁证；实现路径与 HyperCeiler `StickyFloatingWindows`（上游已验证可用）一致。
+     */
+    const val WINDOW_SCALE_PATH = "/data/system/memoryfreeform_window_scale"
+
+    // fix172：scale 读缓存（恢复链路在 binder 线程上，不能每次启动都开文件）。
+    private var scaleAt = 0L
+    private var scaleRaw = ""
+
+    /** ★ fix172：读某包当前方向的缩放记忆（300ms 缓存；没有/解析失败返回 null）。 */
+    fun readWindowScale(pkg: String, landscape: Boolean): Float? = synchronized(this) {
+        val now = System.currentTimeMillis()
+        if (now - scaleAt > 300) {
+            scaleAt = now
+            scaleRaw = runCatching { File(WINDOW_SCALE_PATH).readText() }.getOrDefault("")
+        }
+        val key = memoryKey(pkg, landscape)
+        for (l in scaleRaw.lines()) {
+            if (!l.startsWith("$key=")) continue
+            val v = l.substring(key.length + 1).trim().toFloatOrNull() ?: return null
+            return if (v in 0.05f..2.0f) v else null
+        }
+        null
+    }
+
+    /**
+     * ★ fix177：**边界钳制必须用的缩放**（记忆里的 `freeformScale`，没有则默认档）。
+     *
+     * ⚠ 不能一律按 [WindowSizing.MIUI_LAYER_SCALE]（0.70）钳制：那是缩放的**默认档**，
+     *   用户拖边角之后实际值可能是 0.45 / 0.91。按 0.70 算出来的"视觉宽"与屏幕上真正
+     *   显示的宽不一致 —— 0.45 的窗会被当成满屏宽，位置上限算成 0 ⇒ 每次重开都被强行
+     *   吸到左边缘（用户报的"实际显示大小与边界判定不一致"）。
+     */
+    fun effectiveScale(pkg: String, landscape: Boolean): Float {
+        val v = readWindowScale(pkg, landscape)
+        return if (v != null && v > 0.01f) v else WindowSizing.MIUI_LAYER_SCALE
+    }
+
+    /** ★ fix172：写某包当前方向的缩放记忆（hook 写线程上调用，覆盖同键行）。 */
+    fun writeWindowScale(pkg: String, landscape: Boolean, scale: Float) {
+        runCatching {
+            val key = memoryKey(pkg, landscape)
+            val f = File(WINDOW_SCALE_PATH)
+            val rest = if (f.exists()) f.readLines().filter { it.isNotBlank() && !it.startsWith("$key=") }
+            else emptyList()
+            f.writeText((rest + "$key=$scale").joinToString("\n") + "\n")
+            runCatching { f.setReadable(true, false) }
+            synchronized(this) { scaleAt = 0L } // 失效缓存
+        }
+    }
+
+    /** ★ fix172：清空缩放记忆（App 侧清记忆 / 改尺寸设置时随 [WINDOW_MEMORY_PATH] 一起清）。 */
+    fun wipeWindowScale() {
+        runCatching { File(WINDOW_SCALE_PATH).delete() }
+        synchronized(this) { scaleAt = 0L; scaleRaw = "" }
+    }
 
     /** ★ fix128 / ★ fix142：[FLAGS_PATH] 里 `rememberSize` 的当前值（300ms 缓存；缺失 = false）。 */
     fun rememberSizeEnabled(): Boolean = synchronized(this) {
