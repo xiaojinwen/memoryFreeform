@@ -90,7 +90,7 @@ data class AppState(
      * 开（默认）= 位置 + 大小一起记，拉伸过的尺寸下次打开能恢复（用户明确期望）；
      * 关 = 只记位置，尺寸永远按设置走（改尺寸设置立刻对所有 App 生效、且不清位置记忆）。
      */
-    val rememberWindowSize: Boolean = false,
+    val rememberWindowSize: Boolean = true,
     /** 最近一次开进小窗的目标，供悬浮球一键复现 */
     val lastPackage: String? = null,
     val lastActivity: String? = null
@@ -159,7 +159,7 @@ object StateManager {
             floatBallSlideMode = p.getBoolean(KEY_BALL_SLIDE, false),
             autoDock = p.getBoolean(KEY_AUTO_DOCK, true),
             // ★ fix142：默认关（fix91 曾改为默认开；老用户已存过值的不受影响）
-            rememberWindowSize = p.getBoolean(KEY_REMEMBER_SIZE, false),
+            rememberWindowSize = p.getBoolean(KEY_REMEMBER_SIZE, true),
             lastPackage = p.getString(KEY_LAST_PKG, null)?.takeIf { it.isNotEmpty() },
             lastActivity = p.getString(KEY_LAST_ACT, null)?.takeIf { it.isNotEmpty() }
         )

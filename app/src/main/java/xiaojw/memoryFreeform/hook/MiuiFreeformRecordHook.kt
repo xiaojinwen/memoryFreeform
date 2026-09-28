@@ -384,7 +384,7 @@ object MiuiFreeformRecordHook {
      *    本次启动**本来就是 freeform**（launchWindowingMode==5）且该包有 scale 记忆时，
      *    `ActivityOptionsInjector.setFreeformScale` 注入记忆值。绝不把全屏启动改成小窗。
      *
-     * 两端都受「记住小窗大小」开关（[HookContract.rememberSizeEnabled]，fix142 默认关）管。
+     * 两端都受「记住小窗大小」开关（[HookContract.rememberSizeEnabled]，fix182 起默认开）管。
      */
     private fun installScaleSites(lpparam: XC_LoadPackage.LoadPackageParam) {
         // ---- 记录：ATMS.resizeTask ----

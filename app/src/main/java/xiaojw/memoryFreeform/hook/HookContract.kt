@@ -3,6 +3,8 @@ package xiaojw.memoryFreeform.hook
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 import android.content.Context
+import android.os.Handler
+import android.os.HandlerThread
 import android.provider.Settings
 import de.robv.android.xposed.XposedHelpers
 import xiaojw.memoryFreeform.core.WindowSizing
@@ -144,8 +146,8 @@ object HookContract {
      * 那一条路，主开窗链路上它什么也不管（用户观察到的"位置本来就会记"）。
      * 语义（用户定音）：**位置始终按记忆恢复；本开关只管大小** —— 关 = 大小用
      * 学得的系统默认（[DEFAULT_RECT_PATH]），开 = 位置和大小都按记忆。
-     * ★ fix142：文件缺失**按关（false）**处理 —— 与 App 侧开关默认值一致
-     * （fix128 定的是"缺失按开"，随开关默认改关一起翻转）。重装/重启后 App 起来
+     * ★ fix142→fix182：文件缺失**按开（true）**处理 —— 与 App 侧开关默认值一致
+     * （fix128 定的是"缺失按开"，fix142 曾随开关默认改关一起翻成关；fix182 起默认开）。重装/重启后 App 起来
      * 会补写真实值（[xiaojw.memoryFreeform.core.SingleHandManager.pushRememberSizeFlag]）。
      */
     const val FLAGS_PATH = "/data/system/memoryfreeform_flags"
@@ -219,6 +221,37 @@ object HookContract {
     private var scaleMemAt = 0L
     private const val MEM_TTL_MS = 300L
 
+    // fix181：文件兜底写改为「延迟 3 秒 + 防抖」。Global 是主持久化（即时写），文件只是兜底
+    // 镜像，延后无碍；回刷时以 Global 当前值为准，清记忆（Global 置空）后不会复活旧数据。
+    private val fileThread = HandlerThread("memoryfreeform-file").also { it.start() }
+    private val fileHandler = Handler(fileThread.looper)
+    private const val FILE_FLUSH_DELAY_MS = 3000L
+    private val pendingFileFlush = ConcurrentHashMap<String, Runnable>()
+
+    /** fix181：把 Global 当前值原子回刷到文件（延迟防抖任务里执行，与位置写同口径 tmp+rename）。 */
+    private fun writeFileAtomic(path: String, text: String) {
+        runCatching {
+            val f = File(path)
+            val tmp = File(path + ".tmp")
+            tmp.writeText(text + "\n")
+            runCatching { tmp.setReadable(true, false); tmp.setWritable(true, false) }
+            tmp.renameTo(f)
+        }
+    }
+
+    /** fix181：进 Global 的记忆文件 → 延迟 3s + 防抖回刷（以 Global 当前值为准）。 */
+    private fun scheduleFileFlush(path: String, globalKey: String) {
+        pendingFileFlush.remove(path)?.let { fileHandler.removeCallbacks(it) } // 防抖：取消旧计时
+        val r = Runnable {
+            pendingFileFlush.remove(path)
+            val text = globalGet(globalKey)
+            if (text.isNullOrEmpty()) runCatching { File(path).delete() } // 清记忆后 Global 空 → 同步清文件
+            else writeFileAtomic(path, text)
+        }
+        pendingFileFlush[path] = r
+        fileHandler.postDelayed(r, FILE_FLUSH_DELAY_MS)
+    }
+
     private fun parseScaleLine(text: String, key: String): Float? {
         for (l in text.lineSequence()) {
             if (!l.startsWith("$key=")) continue
@@ -276,23 +309,21 @@ object HookContract {
         return if (v != null && v > 0.01f) v else WindowSizing.MIUI_LAYER_SCALE
     }
 
-    /** ★ fix180：写某包当前方向的缩放记忆（内存即时 + Settings.Global + 文件兜底）。 */
+    /** ★ fix180/181：写某包当前方向的缩放记忆（内存即时 + Settings.Global 即时 + 文件延迟3s防抖）。 */
     fun writeWindowScale(pkg: String, landscape: Boolean, scale: Float) {
         val key = memoryKey(pkg, landscape)
         synchronized(scaleMem) { scaleMem[key] = scale; scaleMemAt = System.currentTimeMillis() }
         val all = loadAllScale()
         all[key] = scale
         val text = all.map { "${it.key}=${it.value}" }.joinToString("\n")
-        globalPut(SCALE_GLOBAL_KEY, text)
-        runCatching {
-            val f = File(WINDOW_SCALE_PATH); f.writeText(text + "\n")
-            runCatching { f.setReadable(true, false) }
-        }
+        globalPut(SCALE_GLOBAL_KEY, text)                       // 主持久化：即时写
+        scheduleFileFlush(WINDOW_SCALE_PATH, SCALE_GLOBAL_KEY)  // 兜底文件：延迟3s防抖
     }
 
-    /** ★ fix180：清空缩放记忆（内存 + Settings.Global + 文件，三处都清）。 */
+    /** ★ fix180/181：清空缩放记忆（内存 + Settings.Global + 文件，三处都清；并取消待落盘任务）。 */
     fun wipeWindowScale() {
         synchronized(scaleMem) { scaleMem.clear(); scaleMemAt = 0L }
+        pendingFileFlush.remove(WINDOW_SCALE_PATH)?.let { fileHandler.removeCallbacks(it) }
         globalPut(SCALE_GLOBAL_KEY, "")
         runCatching { File(WINDOW_SCALE_PATH).delete() }
     }
@@ -356,7 +387,8 @@ object HookContract {
         return null
     }
 
-    /** ★ fix180：写位置记忆（内存即时 + 仅 WINDOW_MEMORY_PATH 进 Global + 文件 tmp+rename 兜底）。 */
+    /** ★ fix180/181：写位置记忆。进 Global 的记忆文件（WINDOW_MEMORY_PATH）走「内存即时 +
+     *  Settings.Global 即时 + 文件延迟3s防抖」；不进 Global 的系统量（DEFAULT_RECT 等）仍即时写文件。 */
     fun putMemoryRect(path: String, key: String, value: String) {
         val rect = runCatching {
             val v = value.split(",").mapNotNull { it.trim().toIntOrNull() }
@@ -367,25 +399,28 @@ object HookContract {
         if (gkey != null) {
             val all = loadAllRect(path); all[key] = rect
             globalPut(gkey, all.map { "${it.key}=${it.value.joinToString(",")}" }.joinToString("\n"))
-        }
-        runCatching {
-            val f = File(path)
-            val kept = if (f.exists()) f.readLines().filter { !it.startsWith("$key=") } else emptyList()
-            val tmp = File(path + ".tmp")
-            tmp.writeText((kept + "$key=$value").joinToString("\n") + "\n")
-            runCatching { tmp.setReadable(true, false); tmp.setWritable(true, false) }
-            tmp.renameTo(f)
+            scheduleFileFlush(path, gkey) // 兜底文件：延迟3s防抖
+        } else {
+            // 不进 Global 的系统内部量（默认几何等）：低频，文件即时写
+            runCatching {
+                val f = File(path)
+                val kept = if (f.exists()) f.readLines().filter { !it.startsWith("$key=") } else emptyList()
+                val tmp = File(path + ".tmp")
+                tmp.writeText((kept + "$key=$value").joinToString("\n") + "\n")
+                runCatching { tmp.setReadable(true, false); tmp.setWritable(true, false) }
+                tmp.renameTo(f)
+            }
         }
     }
 
-    /** ★ fix128 / ★ fix142：[FLAGS_PATH] 里 `rememberSize` 的当前值（300ms 缓存；缺失 = false）。 */
+    /** ★ fix128 / ★ fix142 / ★ fix182：[FLAGS_PATH] 里 `rememberSize` 的当前值（300ms 缓存；缺失 = true，即默认开）。 */
     fun rememberSizeEnabled(): Boolean = synchronized(this) {
         val now = System.currentTimeMillis()
         if (now - flagAt > 300) {
             flagAt = now
             flagRaw = runCatching { File(FLAGS_PATH).readText() }.getOrDefault("")
         }
-        var on = false
+        var on = true
         for (tok in flagRaw.split(Regex("\\s+"))) {
             val i = tok.indexOf('=')
             if (i > 0 && tok.substring(0, i) == "rememberSize") {
