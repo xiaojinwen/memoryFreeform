@@ -103,6 +103,15 @@ object HookContract {
     const val WINDOW_MEMORY_PATH = "/data/system/memoryfreeform_window_memory"
 
     /**
+     * ★ fix191：**实时缩放快照**（hook 单向写、调试浮层只读，不参与任何记忆决策）。
+     *
+     * `pkg=0.63` 一行一个包，由 `Task.setMiuiFreeformScale(F)` 事件驱动刷新（节流 300ms）。
+     * 用途：把「系统当下真实的 freeformScale」暴露给调试浮层 —— 记忆里的 `s` 是上次写盘的
+     * 结果，只有跟这个实时值对比，才能分清「没记住」还是「还没写」。
+     */
+    const val LIVE_SCALE_PATH = "/data/system/memoryfreeform_live_scale"
+
+    /**
      * ★ fix124：**「系统默认几何」**（hook 写 hook 读，App 不参与）。
      *
      * 行格式与 [WINDOW_MEMORY_PATH] 同构，按方向一行：
@@ -386,6 +395,9 @@ object HookContract {
         }
         return null
     }
+
+    /** ★ fix191：整体覆盖写一份纯文本快照（仅调试用，即时写文件、不进 Global、不做防抖）。 */
+    fun writeSnapshotFile(path: String, text: String) = writeFileAtomic(path, text)
 
     /** ★ fix180/181：写位置记忆。进 Global 的记忆文件（WINDOW_MEMORY_PATH）走「内存即时 +
      *  Settings.Global 即时 + 文件延迟3s防抖」；不进 Global 的系统量（DEFAULT_RECT 等）仍即时写文件。 */

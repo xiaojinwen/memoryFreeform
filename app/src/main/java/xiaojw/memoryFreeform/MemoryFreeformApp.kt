@@ -37,6 +37,9 @@ class MemoryFreeformApp : Application() {
         // ★ fix128：把「记住小窗大小」开关下发给 hook（/data/system/memoryfreeform_flags）。
         //   重装 / 重启后文件可能缺失（缺失时 hook 按"开"兜底），进程起来就补写自愈。
         singleHandManager.pushRememberSizeFlag(StateManager.current.rememberWindowSize)
+        // ★ fix188：调试模式是持久开关 —— 进程一起来就按存的开关恢复浮层，
+        //   否则重启后开关显示「开」但屏上没有东西，还得手动来回切一次。
+        xiaojw.memoryFreeform.service.DebugOverlayService.sync(this)
         instance = this
     }
 

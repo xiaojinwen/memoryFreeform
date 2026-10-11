@@ -57,6 +57,7 @@ import xiaojw.memoryFreeform.core.SingleHandManager
 import xiaojw.memoryFreeform.core.StateManager
 import xiaojw.memoryFreeform.core.WindowMemory
 import xiaojw.memoryFreeform.root.RootManager
+import xiaojw.memoryFreeform.service.DebugOverlayService
 import xiaojw.memoryFreeform.service.FloatingBallService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -598,6 +599,17 @@ private fun SettingsRoot(
                 true -> "小窗出生即目标几何，0.70 图层缩放已中和"
                 false -> "在 LSPosed 中勾选本模块并把作用域设为「系统框架」，重启后生效"
                 null -> "检测中…"
+            }
+        )
+        // ★ fix188：调试模式 —— 排查「位置记错 / 大小记不住 / 窗口变大」时打开，
+        //   屏幕左上角实时列出每个小窗的位置 / 下发尺寸 / 记忆缩放 / 视觉尺寸。
+        SuperSwitch(
+            title = "调试模式",
+            summary = "在屏幕左上角显示每个小窗的位置、大小与缩放（多个小窗并排），用于排查记忆问题；不影响触摸操作",
+            checked = state.debugOverlay,
+            onCheckedChange = { on ->
+                StateManager.updateDebugOverlay(on)
+                DebugOverlayService.sync(context)
             }
         )
     }

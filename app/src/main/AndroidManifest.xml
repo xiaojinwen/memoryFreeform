@@ -48,6 +48,14 @@
                 android:value="memory-freeform floating ball" />
         </service>
 
+        <!-- ★ fix188：调试模式浮层（左上角显示各小窗的位置 / 大小 / 缩放） -->
+        <service android:name=".service.DebugOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="memory-freeform debug overlay" />
+        </service>
+
         <!-- 诊断日志对外分享（设置页「分享日志」按钮） -->
         <provider
             android:name="androidx.core.content.FileProvider"

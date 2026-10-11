@@ -97,9 +97,19 @@
 - **坐标系坑**：pointer 事件坐标 ≠ `Task.getBounds()` 空间（`TaskSnapshot.mFreeformScale=0.7`）⇒
   **别拿条带/几何去判定 DOWN**（已废弃），改成「任何 `ACTION_DOWN` + 存在活 freeform 小窗（freeformSeen）」
   ⇒ 快照 = `boundsOf(task)`（putIfAbsent 防双指），正确性靠"拖动必以自己的 DOWN 开头，快照必先于拖动帧"。
-- **判定与落盘**：拖动帧在标记期内只进 `latest` 缓冲不落盘；UP 后两段采样
-  （+900ms / +2.5s，fix80 改 +700ms 且关闭当场写）看 **`Task.getWindowingMode()`**（5=freeform）：
-  #0 活 → 移动，flush 终帧；#0/#1 都不活 → 关闭，写 DOWN 快照覆盖（跟指帧全弃）；#1 又活 = 关闭后重开 → **不写**。
+- **判定与落盘（★ fix186 起换成「单一写入时机」，旧的"写—回滚"模式已废）**：
+  旧做法 = 拖动中实时写跟指帧，判定为关闭时用 DOWN 快照回滚覆盖。回滚依赖两段采样 + 令牌，
+  任一时序错乱就污染（位置变成关闭瞬间的几何），不回滚又丢失 ⇒ 移动/缩放/关闭三件事必然互相打架。
+  新做法 = **拖动期间只缓冲、一律不落盘**；唯一写入时机是 UP +600ms 判定为「移动」之后，
+  读**实时 bounds + 最终 freeformScale** 落一次：
+    · #0（`getWindowingMode()` 仍=5）→ 写，用户的最终位置/大小进记忆；再排 #1 复查。
+    · #0 判关闭 → **什么都不写**。既然从未写过跟指帧，记忆里留着的就是手势前参照位置 ——
+      不需要任何回滚，`writeSnapshotAsClose` 由此零调用；也不可能被关闭动效帧污染。
+    · #1 若又活（#0 的 mode 抖动误判）→ 补写一次。#1 仍关闭 → 不写。
+    · 取消令牌校验（关闭不写 ⇒ 不再有"旧快照盖到新窗口"的风险，多次 flush 天然幂等）；
+      UP 丢失时 `barFlags` 15s 保险丝也会走完整判定补记。
+    · ★ 缩放另加安全阀：按下时快照 `downScale`，抬手时两次读数差 > `SCALE_DRAG_EPS`(0.01) 才
+      认定是用户拉伸并落盘 —— 挡 `getScale()` 那类默认/假读数（常为 1.0，历史据此把窗口改巨大）。
   ★ `isVisible` / `isFreeformTask` **都不能当存活判据**（淡出/切走后置 false 但窗活着，fix78h 因此零写入）。
 - ★ 澎湃关小窗**不 remove Task**（是 mode→fullscreen + 隐藏），所以"靠 remove 触发自愈"永不执行 ⇒ 只能靠采样。
 - 事件顺序：`Task.onMovedByResize(0)` / `onResize(0)` 是拖动落定回调；`setBounds` 剩下的唯一作用是

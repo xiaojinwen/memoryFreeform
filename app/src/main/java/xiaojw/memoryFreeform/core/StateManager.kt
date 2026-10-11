@@ -93,7 +93,15 @@ data class AppState(
     val rememberWindowSize: Boolean = true,
     /** 最近一次开进小窗的目标，供悬浮球一键复现 */
     val lastPackage: String? = null,
-    val lastActivity: String? = null
+    val lastActivity: String? = null,
+    /**
+     * ★ fix188：调试模式（屏上浮层）。
+     *
+     * 开：左上角（状态栏下方）常驻一块半透明浮层，把当前每个 freeform 小窗的
+     * **包名 / 下发 bounds / 下发尺寸 / 记忆缩放 / 视觉尺寸**并排列出来，用于现场排查
+     * 「位置记错 / 大小记不住 / 窗口变大」这类问题（不用再来回拔线抓日志）。
+     */
+    val debugOverlay: Boolean = false
 )
 
 object StateManager {
@@ -116,6 +124,8 @@ object StateManager {
     private const val KEY_REMEMBER_SIZE = "remember_window_size"
     private const val KEY_LAST_PKG = "last_package"
     private const val KEY_LAST_ACT = "last_activity"
+    /** ★ fix188：调试模式（屏上浮层实时显示各小窗的位置 / 大小 / 缩放）。 */
+    private const val KEY_DEBUG_OVERLAY = "debug_overlay"
     private var prefs: SharedPreferences? = null
 
     private val _state = MutableStateFlow(AppState())
@@ -161,7 +171,9 @@ object StateManager {
             // ★ fix142：默认关（fix91 曾改为默认开；老用户已存过值的不受影响）
             rememberWindowSize = p.getBoolean(KEY_REMEMBER_SIZE, true),
             lastPackage = p.getString(KEY_LAST_PKG, null)?.takeIf { it.isNotEmpty() },
-            lastActivity = p.getString(KEY_LAST_ACT, null)?.takeIf { it.isNotEmpty() }
+            lastActivity = p.getString(KEY_LAST_ACT, null)?.takeIf { it.isNotEmpty() },
+            // ★ fix188：默认关 —— 屏上常驻浮层，只在排查时打开
+            debugOverlay = p.getBoolean(KEY_DEBUG_OVERLAY, false)
         )
     }
 
@@ -199,6 +211,7 @@ object StateManager {
             ?.putBoolean(KEY_REMEMBER_SIZE, current.rememberWindowSize)
             ?.putString(KEY_LAST_PKG, current.lastPackage.orEmpty())
             ?.putString(KEY_LAST_ACT, current.lastActivity.orEmpty())
+            ?.putBoolean(KEY_DEBUG_OVERLAY, current.debugOverlay)
             ?.apply()
     }
 
@@ -369,5 +382,10 @@ object StateManager {
 
     fun updateLastTarget(pkg: String?, act: String?) {
         _state.value = current.copy(lastPackage = pkg, lastActivity = act); save()
+    }
+
+    /** ★ fix188：调试模式开关。由设置页调用，实际浮层的起停见 [DebugOverlayService.sync]。 */
+    fun updateDebugOverlay(enabled: Boolean) {
+        _state.value = current.copy(debugOverlay = enabled); save()
     }
 }
